@@ -148,6 +148,7 @@ const MainPage = () => {
   const [selectedCategoryId, setSelectedCategoryId] = useState<string | null>(null);
   const [friends, setFriends] = useState<Friend[]>([]);
   const [friendRequests, setFriendRequests] = useState<FriendRequest[]>([]);
+  const [isFriendsLoading, setIsFriendsLoading] = useState(true);
   const [messages, setMessages] = useState<Message[]>([]);
   const [showPollDialog, setShowPollDialog] = useState(false);
   const [pollTitle, setPollTitle] = useState("");
@@ -251,6 +252,7 @@ const MainPage = () => {
   };
 
   const [servers, setServers] = useState<Server[]>([]);
+  const [isServersLoading, setIsServersLoading] = useState(true);
 
   // Auto-scroll to bottom when new messages arrive
   useEffect(() => {
@@ -319,25 +321,32 @@ const MainPage = () => {
   // Load friends from Firestore in real-time
   useEffect(() => {
     if (!currentProfileId) {
+      setIsFriendsLoading(false);
       return;
     }
+
+    setIsFriendsLoading(true);
 
     try {
       // Load friends from Firestore
       const userDocRef = doc(db, "users", currentProfileId);
       const friendsDocRef = collection(userDocRef, "friends");
-      
+
       const unsubscribeFriends = onSnapshot(friendsDocRef, (snapshot) => {
         const firebaseFriends = snapshot.docs.map((doc) => ({
           id: doc.id,
           name: doc.data().name,
         }));
         setFriends(firebaseFriends);
+        setIsFriendsLoading(false);
       });
 
-      return () => unsubscribeFriends();
+      return () => {
+        unsubscribeFriends();
+      };
     } catch (error) {
       console.error("Error loading friends from Firestore:", error);
+      setIsFriendsLoading(false);
     }
   }, [currentProfileId]);
 
@@ -498,10 +507,12 @@ const MainPage = () => {
     if (!currentProfileId) {
       console.log("No currentProfileId, skipping server load");
       setServers([]);
+      setIsServersLoading(false);
       return;
     }
 
     console.log("Loading servers for user:", currentProfileId);
+    setIsServersLoading(true);
     
     const loadServers = async () => {
       const serversRef = collection(db, "servers");
@@ -537,6 +548,7 @@ const MainPage = () => {
       
       console.log("Loaded servers user is member of:", withCategories.length, "servers");
       setServers(withCategories);
+      setIsServersLoading(false);
     };
 
     // Initial load
@@ -549,16 +561,16 @@ const MainPage = () => {
       loadServers();
     });
 
-    // Poll for membership changes every 3 seconds when tab is active
+    // Poll for membership changes every 10 seconds when tab is active (reduced from 3 seconds)
     let pollInterval: NodeJS.Timeout | null = null;
-    
+
     const startPolling = () => {
       pollInterval = setInterval(() => {
         if (document.visibilityState === 'visible') {
           console.log("Polling for server membership changes...");
           loadServers();
         }
-      }, 3000);
+      }, 10000);
     };
     
     startPolling();
@@ -2078,32 +2090,42 @@ const MainPage = () => {
         <Separator className="w-8" />
 
         {/* Server Icons */}
-        {servers.map((server) => (
-          <Button
-            key={server.id}
-            variant="ghost"
-            size="icon"
-            onClick={() => handleServerClick(server.id)}
-            className={`w-12 h-12 rounded-2xl transition-all p-0 ${
-              selectedServer === server.id
-                ? "bg-primary text-primary-foreground rounded-xl"
-                : "bg-card hover:bg-accent hover:rounded-xl"
-            }`}
-          >
-            {server.icon ? (
-              <Avatar className="w-full h-full">
-                <AvatarImage src={server.icon} />
-                <AvatarFallback className="bg-primary text-primary-foreground text-sm font-semibold rounded-2xl">
+        {isServersLoading ? (
+          // Loading skeleton for servers
+          Array.from({ length: 3 }).map((_, i) => (
+            <div
+              key={`loading-${i}`}
+              className="w-12 h-12 rounded-2xl bg-muted animate-pulse"
+            />
+          ))
+        ) : (
+          servers.map((server) => (
+            <Button
+              key={server.id}
+              variant="ghost"
+              size="icon"
+              onClick={() => handleServerClick(server.id)}
+              className={`w-12 h-12 rounded-2xl transition-all p-0 ${
+                selectedServer === server.id
+                  ? "bg-primary text-primary-foreground rounded-xl"
+                  : "bg-card hover:bg-accent hover:rounded-xl"
+              }`}
+            >
+              {server.icon ? (
+                <Avatar className="w-full h-full">
+                  <AvatarImage src={server.icon} />
+                  <AvatarFallback className="bg-primary text-primary-foreground text-sm font-semibold rounded-2xl">
+                    {getInitials(server.name)}
+                  </AvatarFallback>
+                </Avatar>
+              ) : (
+                <span className="text-sm font-semibold">
                   {getInitials(server.name)}
-                </AvatarFallback>
-              </Avatar>
-            ) : (
-              <span className="text-sm font-semibold">
-                {getInitials(server.name)}
-              </span>
-            )}
-          </Button>
-        ))}
+                </span>
+              )}
+            </Button>
+          ))
+        )}
 
         {/* Add Server Button */}
         <Button
@@ -2208,7 +2230,17 @@ const MainPage = () => {
 
             {/* Friends List */}
             <div className="flex-1 overflow-y-auto p-2 space-y-1">
-              {friends.length > 0 ? (
+              {isFriendsLoading ? (
+                // Loading skeleton for friends
+                Array.from({ length: 5 }).map((_, i) => (
+                  <div key={`friend-loading-${i}`} className="flex items-center gap-3 p-2">
+                    <div className="w-8 h-8 rounded-full bg-muted animate-pulse" />
+                    <div className="flex-1">
+                      <div className="h-4 w-24 bg-muted rounded animate-pulse" />
+                    </div>
+                  </div>
+                ))
+              ) : friends.length > 0 ? (
                 friends.map((friend) => (
                   <div
                     key={friend.id}
