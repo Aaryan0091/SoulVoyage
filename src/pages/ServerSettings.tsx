@@ -8,7 +8,7 @@ import { Label } from "@/components/ui/label";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { ThemeToggle } from "@/components/ThemeToggle";
 import { ProfileMenu } from "@/components/ProfileMenu";
-import { Upload, X, ArrowLeft, Trash2, Layers, Pencil, Check, Users } from "lucide-react";
+import { Upload, X, ArrowLeft, Trash2, Layers, Pencil, Check, Users, Globe, Lock } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 import { Separator } from "@/components/ui/separator";
 import {
@@ -25,6 +25,7 @@ interface Server {
   id: string;
   name: string;
   icon?: string;
+  isPublic?: boolean;
   channels?: Channel[];
   categories?: Category[];
   createdAt?: any;
@@ -100,6 +101,7 @@ const ServerSettings = () => {
             id: serverDoc.id,
             name: serverData.name || "",
             icon: serverData.icon || "",
+            isPublic: serverData.isPublic !== undefined ? serverData.isPublic : true,
             channels: serverData.channels || [],
             categories: serverData.categories || [],
             createdAt: serverData.createdAt,
@@ -291,10 +293,45 @@ const ServerSettings = () => {
 
   const confirmDeleteServer = async () => {
     try {
-      if (!serverId) return;
+      if (!serverId || !auth.currentUser) {
+        console.error("No serverId or auth.currentUser");
+        return;
+      }
+
+      console.log("Attempting to delete server:", serverId);
+      console.log("Current user UID:", auth.currentUser.uid);
+
+      // First check if user is the owner
+      const serverDoc = await getDoc(doc(db, "servers", serverId));
+      if (!serverDoc.exists()) {
+        console.error("Server document does not exist");
+        toast({
+          title: "Error",
+          description: "Server not found",
+          variant: "destructive",
+        });
+        return;
+      }
+
+      const serverData = serverDoc.data();
+      console.log("Server data:", serverData);
+      console.log("Server owner:", serverData.owner);
+      console.log("Is owner?", serverData.owner === auth.currentUser.uid);
+
+      if (serverData.owner !== auth.currentUser.uid) {
+        console.error("User is not the owner");
+        toast({
+          title: "Error",
+          description: "Only the server owner can delete the server",
+          variant: "destructive",
+        });
+        return;
+      }
 
       // Delete from Firestore
+      console.log("Proceeding with deletion...");
       await deleteDoc(doc(db, "servers", serverId));
+      console.log("Server deleted successfully");
 
       // Update local state
       const updatedServers = servers.filter((s) => s.id !== serverId);
@@ -587,6 +624,32 @@ const ServerSettings = () => {
                 <p className="text-xs text-muted-foreground">
                   {editedServerName.length}/100 characters
                 </p>
+              </div>
+            </div>
+
+            {/* Server Type Section */}
+            <div className="space-y-4">
+              <h2 className="text-lg font-semibold">Server Type</h2>
+              <div className="flex items-center gap-4 p-4 rounded bg-accent/20">
+                <div className="flex items-center gap-2">
+                  {currentServer.isPublic ? (
+                    <>
+                      <Globe className="h-5 w-5 text-primary" />
+                      <div>
+                        <p className="font-medium">Public Server</p>
+                        <p className="text-xs text-muted-foreground">Anyone can discover and join this server</p>
+                      </div>
+                    </>
+                  ) : (
+                    <>
+                      <Lock className="h-5 w-5 text-yellow-500" />
+                      <div>
+                        <p className="font-medium">Private Server</p>
+                        <p className="text-xs text-muted-foreground">Only accessible through direct invitation</p>
+                      </div>
+                    </>
+                  )}
+                </div>
               </div>
             </div>
 

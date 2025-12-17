@@ -1,4 +1,4 @@
-import { db } from "@/lib/firebase";
+import { db, auth } from "@/lib/firebase";
 import {
   collection,
   addDoc,
@@ -285,7 +285,17 @@ export const updateServer = async (
 };
 
 export const deleteServer = async (serverId: string): Promise<void> => {
-  await deleteDoc(doc(db, "servers", serverId));
+  console.log("Attempting to delete server:", serverId);
+  console.log("Current auth state:", auth.currentUser);
+  console.log("User UID:", auth.currentUser?.uid);
+
+  try {
+    await deleteDoc(doc(db, "servers", serverId));
+    console.log("Server deleted successfully");
+  } catch (error) {
+    console.error("Delete operation failed:", error);
+    throw error;
+  }
 };
 
 // Vote on poll

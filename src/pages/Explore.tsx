@@ -56,7 +56,7 @@ const Explore = () => {
               name: serverData.name,
               place: serverData.place || "Unknown Location",
               description: serverData.description || "No description",
-              isPublic: serverData.isPublic || true,
+              isPublic: serverData.isPublic !== undefined ? serverData.isPublic : true,
               icon: serverData.icon,
               owner: serverData.owner,
               members: memberCount,
@@ -85,7 +85,7 @@ const Explore = () => {
     server.name.toLowerCase().includes(searchQuery.toLowerCase())
   );
 
-  const handleJoinServer = async (serverId: string, serverName: string) => {
+  const handleJoinServer = async (serverId: string, serverName: string, isPublic: boolean) => {
     if (!currentProfile || !auth.currentUser) {
       toast({
         title: "Error",
@@ -114,30 +114,70 @@ const Explore = () => {
         return;
       }
 
-      // Add user to server members
-      await setDoc(doc(db, "servers", serverId, "members", auth.currentUser.uid), {
-        userId: auth.currentUser.uid,
-        joinedAt: new Date(),
-        role: "member",
-      });
+      // For private servers, create a join request
+      if (!isPublic) {
+        // Check if user has already sent a request
+        const requestQuery = query(
+          collection(db, "serverJoinRequests"),
+          where("serverId", "==", serverId),
+          where("requesterId", "==", auth.currentUser.uid),
+          where("status", "==", "pending")
+        );
+        const requestSnapshot = await getDocs(requestQuery);
 
-      toast({
-        title: "Success!",
-        description: `You've joined ${serverName}`,
-      });
+        if (!requestSnapshot.empty) {
+          toast({
+            title: "Request Already Sent",
+            description: "You have already sent a request to join this server",
+          });
+          setJoiningServerId(null);
+          return;
+        }
+
+        // Create the join request
+        const requestData = {
+          serverId,
+          serverName,
+          requesterId: auth.currentUser.uid,
+          requesterName: currentProfile?.name || "Unknown",
+          requesterAvatar: currentProfile?.avatarUrl || "",
+          status: "pending",
+          createdAt: new Date(),
+        };
+
+        console.log("Creating join request:", requestData);
+        await setDoc(doc(collection(db, "serverJoinRequests")), requestData);
+
+        toast({
+          title: "Request Sent",
+          description: `Your request to join ${serverName} has been sent to the owner`,
+        });
+      } else {
+        // For public servers, join directly
+        await setDoc(doc(db, "servers", serverId, "members", auth.currentUser.uid), {
+          userId: auth.currentUser.uid,
+          joinedAt: new Date(),
+          role: "member",
+        });
+
+        toast({
+          title: "Success!",
+          description: `You've joined ${serverName}`,
+        });
+
+        // Navigate to the server after a short delay
+        setTimeout(() => {
+          navigate("/main");
+        }, 1000);
+      }
 
       setJoiningServerId(null);
-      
-      // Navigate to the server after a short delay
-      setTimeout(() => {
-        navigate("/main");
-      }, 1000);
     } catch (error) {
       console.error("Error joining server:", error);
       setJoiningServerId(null);
       toast({
         title: "Error",
-        description: "Failed to join server. Please try again.",
+        description: "Failed to process request. Please try again.",
         variant: "destructive",
       });
     }
@@ -276,18 +316,19 @@ const Explore = () => {
                       <div className="border-t border-border px-6 py-4 bg-card/30 space-y-3">
                         <p className="text-sm text-muted-foreground">
                           {server.isPublic
-                            ? "Public server - Anyone can join via invite link"
-                            : "Private server - Requires owner approval to join"}
+                            ? "Public server - Click to join and start exploring!"
+                            : "Private server - Only accessible through direct invitation from the owner"}
                         </p>
-                        <Button 
-                          className="w-full" 
+                        <Button
+                          className="w-full"
                           size="sm"
-                          onClick={() => handleJoinServer(server.id, server.name)}
+                          onClick={() => handleJoinServer(server.id, server.name, server.isPublic)}
                           disabled={joiningServerId === server.id}
+                          variant={!server.isPublic ? "secondary" : "default"}
                         >
-                          {joiningServerId === server.id 
-                            ? "Joining..." 
-                            : server.isPublic ? "Join This Server" : "Ask to Join"}
+                          {joiningServerId === server.id
+                            ? !server.isPublic ? "Requesting..." : "Joining..."
+                            : !server.isPublic ? "Request to Join" : "Join This Server"}
                         </Button>
                       </div>
                     )}

@@ -148,8 +148,11 @@ const MainPage = () => {
   const [selectedCategoryId, setSelectedCategoryId] = useState<string | null>(null);
   const [friends, setFriends] = useState<Friend[]>([]);
   const [friendRequests, setFriendRequests] = useState<FriendRequest[]>([]);
+  const [serverJoinRequests, setServerJoinRequests] = useState<any[]>([]);
+  const [showFriendRequests, setShowFriendRequests] = useState(true);
   const [isFriendsLoading, setIsFriendsLoading] = useState(true);
   const [messages, setMessages] = useState<Message[]>([]);
+  const [hasSoulMessages, setHasSoulMessages] = useState(false);
   const [showPollDialog, setShowPollDialog] = useState(false);
   const [pollTitle, setPollTitle] = useState("");
   const [pollOptions, setPollOptions] = useState(["", ""]);
@@ -259,6 +262,43 @@ const MainPage = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
 
+  // Listen for Soul bot messages
+  useEffect(() => {
+    if (!currentProfileId) return;
+
+    const soulConversationId = `soul_${currentProfileId}`;
+    const messagesRef = collection(db, "conversations", soulConversationId, "messages");
+    const q = query(messagesRef, orderBy("timestamp", "asc"));
+
+    const unsubscribe = onSnapshot(q, (snapshot) => {
+      const soulMessages: Message[] = [];
+      snapshot.forEach((doc) => {
+        const data = doc.data();
+        soulMessages.push({
+          id: doc.id,
+          senderId: data.senderId,
+          senderName: data.senderName,
+          content: data.content,
+          timestamp: data.timestamp,
+          conversationId: soulConversationId,
+          type: data.type,
+        });
+      });
+
+      // Update hasSoulMessages flag
+      setHasSoulMessages(soulMessages.length > 0);
+
+      // Update messages state with Soul messages
+      setMessages((prevMessages) => {
+        // Remove old Soul messages and add new ones
+        const filtered = prevMessages.filter(m => m.conversationId !== soulConversationId);
+        return [...filtered, ...soulMessages];
+      });
+    });
+
+    return () => unsubscribe();
+  }, [currentProfileId]);
+
   // Initialize WebSocket connection (for sending/receiving messages in real-time)
   useEffect(() => {
     // Only attempt WebSocket connection if explicitly enabled
@@ -318,35 +358,173 @@ const MainPage = () => {
     };
   }, []);
 
-  // Load friends from Firestore in real-time
+  // Helper function to load friend avatars in background with batch processing
+  const loadFriendAvatars = async (friends: any[]) => {
+    if (!currentProfileId) return;
+
+    const avatarMap = new Map<string, string>();
+
+    // Process friends in batches of 10 to avoid overwhelming Firestore
+    const batchSize = 10;
+    for (let i = 0; i < friends.length; i += batchSize) {
+      const batch = friends.slice(i, i + batchSize);
+
+      const avatarPromises = batch.map(async (friend) => {
+        try {
+          const friendDocRef = doc(db, "users", friend.id);
+          const friendDocSnap = await getDoc(friendDocRef);
+          if (friendDocSnap.exists()) {
+            const data = friendDocSnap.data();
+            if (data.avatarUrl) {
+              avatarMap.set(friend.id, data.avatarUrl);
+            }
+          }
+        } catch (error) {
+          console.error(`Error loading avatar for ${friend.id}:`, error);
+        }
+      });
+
+      await Promise.all(avatarPromises);
+
+      // Small delay between batches to prevent rate limiting
+      if (i + batchSize < friends.length) {
+        await new Promise(resolve => setTimeout(resolve, 100));
+      }
+    }
+
+    // Only update cache if we actually loaded some avatars
+    if (avatarMap.size > 0) {
+      // Save avatar cache
+      localStorage.setItem(`friends_avatars_${currentProfileId}`, JSON.stringify(Array.from(avatarMap.entries())));
+
+      // Update friends state with avatars
+      setFriends(prev =>
+        prev.map(friend => ({
+          ...friend,
+          avatar: avatarMap.get(friend.id) || friend.avatar || ""
+        }))
+      );
+    }
+  };
+
+  // Load friends from Firestore with optimized caching
   useEffect(() => {
     if (!currentProfileId) {
       setIsFriendsLoading(false);
       return;
     }
 
-    setIsFriendsLoading(true);
+    // Track if component is mounted
+    let isMounted = true;
+
+    // Load from cache first - more comprehensive caching
+    const cachedData = localStorage.getItem(`friends_${currentProfileId}`);
+    const avatarCache = localStorage.getItem(`friends_avatars_${currentProfileId}`);
+
+    if (cachedData) {
+      try {
+        const parsed = JSON.parse(cachedData);
+        // Validate cached data structure
+        if (Array.isArray(parsed)) {
+          if (isMounted) {
+            setFriends(parsed);
+            setIsFriendsLoading(false);
+            console.log("Loaded friends from cache:", parsed.length);
+          }
+        }
+      } catch (e) {
+        console.error("Error parsing cached friends:", e);
+      }
+    }
+
+    // Set a timeout to prevent indefinite loading - further reduced
+    const loadingTimeout = setTimeout(() => {
+      console.log("Friends loading timeout - forcing completion");
+      if (isMounted) {
+        setIsFriendsLoading(false);
+      }
+    }, 1000); // Reduced to 1 second
 
     try {
-      // Load friends from Firestore
+      // Check if friends are stored as subcollections (current approach)
       const userDocRef = doc(db, "users", currentProfileId);
-      const friendsDocRef = collection(userDocRef, "friends");
+      const friendsSubRef = collection(userDocRef, "friends");
 
-      const unsubscribeFriends = onSnapshot(friendsDocRef, (snapshot) => {
-        const firebaseFriends = snapshot.docs.map((doc) => ({
-          id: doc.id,
-          name: doc.data().name,
-        }));
-        setFriends(firebaseFriends);
-        setIsFriendsLoading(false);
+      const unsubscribeFriends = onSnapshot(friendsSubRef, async (snapshot) => {
+        if (!isMounted) return;
+
+        if (!snapshot.empty) {
+          const firebaseFriends = snapshot.docs.map((doc) => ({
+            id: doc.id,
+            name: doc.data().name || "Unknown",
+          }));
+
+          // Parse avatar cache once
+          let avatarMap = new Map();
+          if (avatarCache) {
+            try {
+              avatarMap = new Map(JSON.parse(avatarCache));
+            } catch (e) {
+              console.error("Error parsing avatar cache:", e);
+            }
+          }
+
+          // Apply cached avatars immediately
+          const friendsWithProfiles = firebaseFriends.map(friend => ({
+            ...friend,
+            avatar: avatarMap.get(friend.id) || "",
+          }));
+
+          // Cache the results
+          localStorage.setItem(`friends_${currentProfileId}`, JSON.stringify(friendsWithProfiles));
+
+          setFriends(friendsWithProfiles);
+          clearTimeout(loadingTimeout);
+          setIsFriendsLoading(false);
+
+          // Lazy load avatars in background only if needed
+          const needsAvatarUpdate = firebaseFriends.some(friend => !avatarMap.has(friend.id));
+          if (needsAvatarUpdate) {
+            // Use requestIdleCallback for non-blocking loading
+            const loadAvatars = () => {
+              if (!isMounted) return;
+              loadFriendAvatars(firebaseFriends);
+            };
+
+            if (window.requestIdleCallback) {
+              window.requestIdleCallback(loadAvatars, { timeout: 2000 });
+            } else {
+              setTimeout(loadAvatars, 100);
+            }
+          }
+        } else {
+          // No friends
+          setFriends([]);
+          clearTimeout(loadingTimeout);
+          setIsFriendsLoading(false);
+        }
+      }, (error) => {
+        // Only log error if we haven't already loaded from cache
+        if (!cachedData) {
+          console.error("Error loading friends from Firestore:", error);
+        }
+        if (isMounted) {
+          clearTimeout(loadingTimeout);
+          setIsFriendsLoading(false);
+        }
       });
 
       return () => {
+        isMounted = false;
         unsubscribeFriends();
+        clearTimeout(loadingTimeout);
       };
     } catch (error) {
-      console.error("Error loading friends from Firestore:", error);
-      setIsFriendsLoading(false);
+      console.error("Error setting up friends listener:", error);
+      if (isMounted) {
+        setIsFriendsLoading(false);
+        clearTimeout(loadingTimeout);
+      }
     }
   }, [currentProfileId]);
 
@@ -383,6 +561,143 @@ const MainPage = () => {
     }
   }, [currentProfileId]);
 
+  // Load server join requests for all owned servers
+  useEffect(() => {
+    if (!currentProfileId) {
+      console.log("No current profile ID, skipping server requests setup");
+      setServerJoinRequests([]);
+      return;
+    }
+
+    console.log("Setting up server requests listener for user:", currentProfileId);
+
+    // Use cached owned servers if available
+    const cachedServers = localStorage.getItem(`servers_${currentProfileId}`);
+    if (cachedServers) {
+      const parsed = JSON.parse(cachedServers);
+      const ownedServerIds = parsed
+        .filter(s => s.owner === currentProfileId)
+        .map(s => s.id);
+
+      console.log("Using cached owned servers:", ownedServerIds);
+
+      if (ownedServerIds.length > 0) {
+        // Set up listeners for cached servers immediately
+        console.log("Setting up immediate listeners for cached servers");
+        const unsubscribers: (() => void)[] = [];
+
+        for (const serverId of ownedServerIds) {
+          const requestsRef = collection(db, "serverJoinRequests");
+          const q = query(
+            requestsRef,
+            where("serverId", "==", serverId),
+            where("status", "==", "pending"),
+            orderBy("createdAt", "desc")
+          );
+
+          const unsubscribe = onSnapshot(q, (snapshot) => {
+            const requests = snapshot.docs.map(doc => ({
+              id: doc.id,
+              ...doc.data()
+            }));
+
+            setServerJoinRequests(prev => {
+              const filtered = prev.filter(r => r.serverId !== serverId);
+              return [...filtered, ...requests];
+            });
+          });
+
+          unsubscribers.push(unsubscribe);
+        }
+
+        // Store cleanup function
+        const cleanup = () => {
+          unsubscribers.forEach(unsub => unsub());
+        };
+
+        // Store cleanup for later
+        (window as any).serverRequestsCleanup = cleanup;
+      } else {
+        setServerJoinRequests([]);
+      }
+    }
+
+    // Also fetch from Firestore in background to update cache
+    const setupListener = async () => {
+      try {
+        const serversRef = collection(db, "servers");
+        const serversSnapshot = await getDocs(serversRef);
+
+        const ownedServerIds = serversSnapshot.docs
+          .filter(doc => doc.data().owner === currentProfileId)
+          .map(doc => doc.id);
+
+        console.log("User owns servers:", ownedServerIds);
+
+        if (ownedServerIds.length === 0) {
+          console.log("User doesn't own any servers");
+          setServerJoinRequests([]);
+          return;
+        }
+
+        // Set up listeners for each owned server
+        const unsubscribers: (() => void)[] = [];
+
+        for (const serverId of ownedServerIds) {
+          console.log(`Setting up listener for server: ${serverId}`);
+          const requestsRef = collection(db, "serverJoinRequests");
+          const q = query(
+            requestsRef,
+            where("serverId", "==", serverId),
+            where("status", "==", "pending"),
+            orderBy("createdAt", "desc")
+          );
+
+          const unsubscribe = onSnapshot(q, (snapshot) => {
+            const requests = snapshot.docs.map(doc => ({
+              id: doc.id,
+              ...doc.data()
+            }));
+
+            console.log(`Found ${requests.length} requests for server ${serverId}:`, requests);
+
+            // Update state with all requests from this server
+            setServerJoinRequests(prev => {
+              // Remove old requests from this server and add new ones
+              const filtered = prev.filter(r => r.serverId !== serverId);
+              const updated = [...filtered, ...requests];
+              console.log("Updated all server requests:", updated);
+              return updated;
+            });
+          });
+
+          unsubscribers.push(unsubscribe);
+        }
+
+        return () => {
+          console.log("Cleaning up server request listeners");
+          unsubscribers.forEach(unsub => unsub());
+        };
+      } catch (error) {
+        console.error("Error setting up join requests listener:", error);
+        setServerJoinRequests([]);
+      }
+    };
+
+    let unsubscribe: (() => void) | undefined;
+
+    setupListener().then((unsub) => {
+      unsubscribe = unsub;
+    });
+
+    return () => {
+      if (unsubscribe) unsubscribe();
+      if ((window as any).serverRequestsCleanup) {
+        (window as any).serverRequestsCleanup();
+      }
+    };
+  }, [currentProfileId, user]);
+
   // Generate consistent conversation ID
   const getConversationId = (otherUserId: string | undefined) => {
     if (!otherUserId || !currentProfileId) return "";
@@ -414,7 +729,7 @@ const MainPage = () => {
 
     const setupConversationListener = async () => {
       try {
-        // First, ensure the conversation document exists
+        // Always ensure the conversation document exists first
         const conversationRef = doc(db, "conversations", conversationId);
         const conversationDoc = await getDoc(conversationRef);
 
@@ -430,7 +745,7 @@ const MainPage = () => {
           });
         }
 
-        // Now set up the messages listener
+        // Set up the messages listener with no limit for now
         const messagesRef = collection(db, "conversations", conversationId, "messages");
         const q = query(messagesRef, orderBy("timestamp", "asc"));
 
@@ -442,9 +757,9 @@ const MainPage = () => {
               senderId: data.senderId,
               senderName: data.senderName,
               content: data.content,
-              timestamp: data.timestamp,
-              conversationId: data.conversationId,
-              type: data.type,
+              timestamp: data.timestamp?.toMillis ? data.timestamp.toMillis() : data.timestamp,
+              conversationId: conversationId, // Ensure conversationId is set
+              type: data.type || "text",
               photoUrl: data.photoUrl,
               poll: data.poll,
               deletedForEveryone: data.deletedForEveryone,
@@ -453,7 +768,10 @@ const MainPage = () => {
               tripId: data.tripId,
             };
           });
+
           console.log("Setting messages state:", firestoreMessages.length, "messages for", conversationId);
+          console.log("First message:", firestoreMessages[0]);
+          // Set messages directly for this conversation
           setMessages(firestoreMessages);
         }, (error) => {
           console.error("Error in messages listener:", error);
@@ -502,7 +820,7 @@ const MainPage = () => {
     }
   }, [selectedServer]);
 
-  // Load servers from Firestore in real-time (only servers user is a member of)
+  // Load servers from Firestore efficiently
   useEffect(() => {
     if (!currentProfileId) {
       console.log("No currentProfileId, skipping server load");
@@ -513,73 +831,115 @@ const MainPage = () => {
 
     console.log("Loading servers for user:", currentProfileId);
     setIsServersLoading(true);
-    
+
     const loadServers = async () => {
-      const serversRef = collection(db, "servers");
-      const snapshot = await getDocs(serversRef);
-      
-      console.log("Servers snapshot:", snapshot.docs.length, "total servers in database");
-      
-      const serversPromises = snapshot.docs.map(async (docSnap) => {
-        const serverData = docSnap.data();
-        
-        // Check if user is a member of this server
-        const membersSnapshot = await getDocs(collection(db, `servers/${docSnap.id}/members`));
-        const isMember = membersSnapshot.docs.some(memberDoc => memberDoc.id === currentProfileId);
-        
-        console.log(`Server ${serverData.name}: user is member?`, isMember);
-        
-        // Only return server if user is a member
-        if (isMember) {
-          return {
-            id: docSnap.id,
-            name: serverData.name,
-            icon: serverData.icon,
-            isPublic: serverData.isPublic,
-            channels: serverData.channels || [SERVER_DEFAULTS.defaultChannel],
-            categories: serverData.categories || [SERVER_DEFAULTS.defaultCategory],
-          };
+      try {
+        // First load from cache/localStorage if available
+        const cachedServers = localStorage.getItem(`servers_${currentProfileId}`);
+        if (cachedServers) {
+          const parsed = JSON.parse(cachedServers);
+          const withCategories = parsed.map(ensureServerHasCategories);
+          setServers(withCategories);
+          setIsServersLoading(false);
         }
-        return null;
-      });
-      
-      const firestoreServers = (await Promise.all(serversPromises)).filter(server => server !== null);
-      const withCategories = firestoreServers.map(ensureServerHasCategories);
-      
-      console.log("Loaded servers user is member of:", withCategories.length, "servers");
-      setServers(withCategories);
-      setIsServersLoading(false);
+
+        // Then fetch from Firestore
+        const serversRef = collection(db, "servers");
+        const snapshot = await getDocs(serversRef);
+
+        console.log("Servers snapshot:", snapshot.docs.length, "total servers in database");
+
+        // Process servers in parallel for better performance
+        const serverPromises = snapshot.docs.map(async (docSnap) => {
+          const serverData = docSnap.data();
+
+          // Optimized member check - get single document
+          const memberRef = doc(db, `servers/${docSnap.id}/members`, currentProfileId);
+          const memberSnapshot = await getDoc(memberRef);
+          const isMember = memberSnapshot.exists();
+
+          if (isMember) {
+            return {
+              id: docSnap.id,
+              name: serverData.name,
+              icon: serverData.icon,
+              isPublic: serverData.isPublic,
+              channels: serverData.channels || [SERVER_DEFAULTS.defaultChannel],
+              categories: serverData.categories || [SERVER_DEFAULTS.defaultCategory],
+            };
+          }
+          return null;
+        });
+
+        const serverResults = await Promise.all(serverPromises);
+        const memberServers = serverResults.filter(s => s !== null) as Server[];
+        const withCategories = memberServers.map(ensureServerHasCategories);
+
+        // Cache the results
+        localStorage.setItem(`servers_${currentProfileId}`, JSON.stringify(memberServers));
+
+        console.log("Loaded servers user is member of:", withCategories.length, "servers");
+        setServers(withCategories);
+        setIsServersLoading(false);
+      } catch (error) {
+        console.error("Error loading servers:", error);
+        setIsServersLoading(false);
+      }
     };
 
     // Initial load
     loadServers();
-    
-    // Set up real-time listener for server changes (name, icon, channels, etc.)
-    const serversRef = collection(db, "servers");
-    const unsubscribeServers = onSnapshot(serversRef, () => {
-      console.log("Server collection changed, reloading servers...");
-      loadServers();
-    });
 
-    // Poll for membership changes every 10 seconds when tab is active (reduced from 3 seconds)
-    let pollInterval: NodeJS.Timeout | null = null;
-
-    const startPolling = () => {
-      pollInterval = setInterval(() => {
-        if (document.visibilityState === 'visible') {
-          console.log("Polling for server membership changes...");
-          loadServers();
-        }
-      }, 10000);
+    // Only reload when page becomes visible
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible') {
+        loadServers();
+      }
     };
-    
-    startPolling();
+
+    document.addEventListener('visibilitychange', handleVisibilityChange);
 
     return () => {
-      unsubscribeServers();
-      if (pollInterval) clearInterval(pollInterval);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
     };
   }, [currentProfileId]);
+
+  // Restore last selected server/channel
+  useEffect(() => {
+    if (!servers || servers.length === 0) return;
+
+    const lastServerId = localStorage.getItem(`lastServer_${currentProfileId}`);
+    const lastChannelId = localStorage.getItem(`lastChannel_${currentProfileId}`);
+
+    if (lastServerId && servers.find(s => s.id === lastServerId)) {
+      setSelectedServer(lastServerId);
+      if (lastChannelId && servers.find(s => s.id === lastServerId)?.channels?.find(c => c.id === lastChannelId)) {
+        setSelectedChannel(lastChannelId);
+      } else {
+        // Select first channel if no last channel
+        const server = servers.find(s => s.id === lastServerId);
+        if (server?.channels?.length) {
+          setSelectedChannel(server.channels[0].id);
+        }
+      }
+    } else if (servers.length > 0) {
+      // Auto-select first server
+      setSelectedServer(servers[0].id);
+      if (servers[0].channels?.length) {
+        setSelectedChannel(servers[0].channels[0].id);
+      }
+    }
+  }, [servers, currentProfileId]);
+
+  // Save selected server/channel to localStorage
+  useEffect(() => {
+    if (selectedServer) {
+      localStorage.setItem(`lastServer_${currentProfileId}`, selectedServer);
+    }
+    if (selectedChannel) {
+      localStorage.setItem(`lastChannel_${currentProfileId}`, selectedChannel);
+    }
+  }, [selectedServer, selectedChannel, currentProfileId]);
 
   useEffect(() => {
     if (searchParams.get("settingsSaved") === "true") {
@@ -618,18 +978,18 @@ const MainPage = () => {
       });
       return;
     }
-    
+
     try {
       const serverId = `server_${Date.now()}`;
       const userId = currentProfileId;
-      
+
       console.log("Creating server:", serverData.name, "isPublic:", serverData.isPublic);
-      
-      // Save to Firestore
-      await setDoc(doc(db, "servers", serverId), {
+
+      // Prepare all data for parallel writes
+      const serverDocPromise = setDoc(doc(db, "servers", serverId), {
         name: serverData.name,
         icon: serverData.icon || "",
-        isPublic: serverData.isPublic !== false, // Default to true if not specified
+        isPublic: serverData.isPublic !== undefined ? serverData.isPublic : true,
         owner: userId,
         place: "Location",
         description: "",
@@ -638,21 +998,32 @@ const MainPage = () => {
         createdAt: Timestamp.now(),
       });
 
-      console.log("Server created in Firestore");
-
-      // Add current user as a member
-      await setDoc(doc(db, `servers/${serverId}/members`, userId), {
+      const memberDocPromise = setDoc(doc(db, `servers/${serverId}/members`, userId), {
         joinedAt: Timestamp.now(),
         role: "owner",
       });
-      
-      console.log("User added as owner member");
 
-      // The Firestore listener will automatically add it to the servers list
-      // Just expand it and select it
+      // Execute both writes in parallel for faster creation
+      await Promise.all([serverDocPromise, memberDocPromise]);
+
+      console.log("Server and member created in Firestore");
+
+      // Update local state immediately for better UX
+      const newServer = {
+        id: serverId,
+        name: serverData.name,
+        icon: serverData.icon,
+        channels: [SERVER_DEFAULTS.defaultChannel],
+        categories: [SERVER_DEFAULTS.defaultCategory],
+      };
+
+      const newServerWithCategories = ensureServerHasCategories(newServer);
+      setServers(prev => [...prev, newServerWithCategories]);
+
+      // Select the new server immediately
       setExpandedServers(new Set([...expandedServers, serverId]));
       handleServerClick(serverId);
-      
+
       toast({
         title: "Success",
         description: `Server "${serverData.name}" created successfully!`,
@@ -901,13 +1272,31 @@ const MainPage = () => {
       try {
         const membersSnapshot = await getDocs(collection(db, `servers/${selectedServer}/members`));
         const membersList = membersSnapshot.docs
-          .filter(doc => doc.id !== currentProfileId) // Exclude current user
-          .map(doc => ({
-            id: doc.id,
-            ...doc.data()
-          }));
+          .filter(doc => doc.id !== currentProfileId); // Exclude current user
 
-        setServerMembers(membersList);
+        // Fetch user profiles for each member
+        const membersWithData = await Promise.all(
+          membersList.map(async (memberDoc) => {
+            const memberData = memberDoc.data();
+            const userDoc = await getDoc(doc(db, "users", memberDoc.id));
+
+            console.log("Fetching user data for:", memberDoc.id);
+            console.log("User doc exists:", userDoc.exists());
+            if (userDoc.exists()) {
+              console.log("User data:", userDoc.data());
+            }
+
+            return {
+              id: memberDoc.id,
+              ...memberData,
+              name: userDoc.exists() ? userDoc.data().name || "Unknown User" : "Unknown User",
+              avatar: userDoc.exists() ? userDoc.data().avatarUrl || "" : ""
+            };
+          })
+        );
+
+        console.log("Fetched server members with data:", membersWithData);
+        setServerMembers(membersWithData);
 
         if (membersList.length > 0) {
           // Has other members - need to transfer ownership
@@ -942,11 +1331,18 @@ const MainPage = () => {
         description: `You have successfully left ${currentServer?.name}`,
       });
 
+      // Remove server from local state immediately
+      setServers(prev => prev.filter(s => s.id !== selectedServer));
+
       // Reset selection to direct messages
       setSelectedServer(null);
       setSelectedChannel(null);
       setShowDirectMessages(true);
       setShowLeaveServerDialog(false);
+
+      // Clean up related state
+      setServerMembers([]);
+      setIsServerOwner(false);
     } catch (error) {
       console.error("Error leaving server:", error);
       toast({
@@ -979,12 +1375,19 @@ const MainPage = () => {
         description: `Server ownership has been transferred and you have left ${currentServer?.name}`,
       });
 
+      // Remove server from local state immediately
+      setServers(prev => prev.filter(s => s.id !== selectedServer));
+
       // Reset selection
       setSelectedServer(null);
       setSelectedChannel(null);
       setShowDirectMessages(true);
       setShowTransferOwnershipDialog(false);
       setSelectedNewOwner(null);
+
+      // Clean up related state
+      setServerMembers([]);
+      setIsServerOwner(false);
     } catch (error) {
       console.error("Error transferring ownership:", error);
       toast({
@@ -996,28 +1399,84 @@ const MainPage = () => {
   };
 
   const deleteServerAndLeave = async () => {
-    if (!selectedServer || !currentProfileId) return;
+    if (!selectedServer || !currentProfileId || !auth.currentUser) {
+      console.error("Missing required data for server deletion:", { selectedServer, currentProfileId, hasAuth: !!auth.currentUser });
+      return;
+    }
 
     try {
-      // Delete all channels' messages
-      const channels = currentServer?.channels || [];
-      for (const channel of channels) {
-        const messagesRef = collection(db, "conversations", `server_${selectedServer}_channel_${channel.id}`, "messages");
-        const messagesSnapshot = await getDocs(messagesRef);
-        for (const msgDoc of messagesSnapshot.docs) {
-          await deleteDoc(msgDoc.ref);
-        }
-        await deleteDoc(doc(db, "conversations", `server_${selectedServer}_channel_${channel.id}`));
+      console.log("Attempting to delete server:", selectedServer);
+      console.log("Current user:", auth.currentUser.uid);
+
+      // First check if user is the owner
+      const serverDoc = await getDoc(doc(db, "servers", selectedServer));
+      if (!serverDoc.exists()) {
+        console.error("Server document not found");
+        return;
       }
 
-      // Delete all members
+      const serverData = serverDoc.data();
+      console.log("Server owner:", serverData.owner);
+      console.log("Is owner?:", serverData.owner === auth.currentUser.uid);
+
+      if (serverData.owner !== auth.currentUser.uid) {
+        console.error("User is not the server owner");
+        toast({
+          title: "Error",
+          description: "Only the server owner can delete the server",
+          variant: "destructive",
+        });
+        return;
+      }
+
+      // Delete all members first
+      console.log("Deleting server members...");
       const membersSnapshot = await getDocs(collection(db, `servers/${selectedServer}/members`));
       for (const memberDoc of membersSnapshot.docs) {
         await deleteDoc(memberDoc.ref);
       }
 
+      // Delete all server join requests for this server
+      console.log("Deleting server join requests...");
+      const joinRequestsQuery = query(
+        collection(db, "serverJoinRequests"),
+        where("serverId", "==", selectedServer)
+      );
+      const joinRequestsSnapshot = await getDocs(joinRequestsQuery);
+      for (const reqDoc of joinRequestsSnapshot.docs) {
+        await deleteDoc(reqDoc.ref);
+      }
+
+      // Delete all trips associated with this server
+      console.log("Deleting server trips...");
+      const tripsQuery = query(
+        collection(db, "trips"),
+        where("serverId", "==", selectedServer)
+      );
+      const tripsSnapshot = await getDocs(tripsQuery);
+      for (const tripDoc of tripsSnapshot.docs) {
+        const tripData = tripDoc.data();
+
+        // Delete trip conversation if exists
+        if (tripData.channelId) {
+          try {
+            await deleteDoc(doc(db, "conversations", `server_${selectedServer}_channel_${tripData.channelId}`));
+          } catch (error) {
+            console.log("No conversation to delete for trip channel:", tripData.channelId);
+          }
+        }
+
+        // Delete the trip document
+        await deleteDoc(tripDoc.ref);
+      }
+
       // Delete the server document
+      console.log("Deleting server document...");
       await deleteDoc(doc(db, "servers", selectedServer));
+      console.log("Server deleted successfully");
+
+      // Remove server from local state immediately
+      setServers(prev => prev.filter(s => s.id !== selectedServer));
 
       toast({
         title: "Server Deleted",
@@ -1029,6 +1488,10 @@ const MainPage = () => {
       setSelectedChannel(null);
       setShowDirectMessages(true);
       setShowLeaveServerDialog(false);
+
+      // Clean up any related state
+      setServerMembers([]);
+      setIsServerOwner(false);
     } catch (error) {
       console.error("Error deleting server:", error);
       toast({
@@ -1416,6 +1879,100 @@ const MainPage = () => {
     }
   };
 
+  // Handle accepting a server join request
+  const handleAcceptJoinRequest = async (requestId: string, requesterId: string, serverId: string, serverName: string, requesterName: string) => {
+    try {
+      // Add user to server members
+      await setDoc(doc(db, "servers", serverId, "members", requesterId), {
+        userId: requesterId,
+        joinedAt: new Date(),
+        role: "member",
+      });
+
+      // Update request status to accepted
+      await updateDoc(doc(db, "serverJoinRequests", requestId), {
+        status: "accepted",
+        respondedAt: new Date(),
+      });
+
+      // Create a notification message in the general channel
+      const generalChannel = currentServer?.channels?.find(c => !c.isHidden);
+      if (generalChannel) {
+        const conversationId = `server_${serverId}_channel_${generalChannel.id}`;
+        const notificationMessage = {
+          id: `msg_${Date.now()}`,
+          conversationId,
+          senderId: currentProfileId!,
+          senderName: "System",
+          content: `${requesterName} has joined the server!`,
+          timestamp: Date.now(),
+          type: "text",
+        };
+
+        await setDoc(doc(db, "conversations", conversationId, "messages", notificationMessage.id), notificationMessage);
+      }
+
+      toast({
+        title: "Request Accepted",
+        description: "User has been added to the server",
+      });
+    } catch (error) {
+      console.error("Error accepting join request:", error);
+      toast({
+        title: "Error",
+        description: "Failed to accept request",
+        variant: "destructive",
+      });
+    }
+  };
+
+  // Handle denying a server join request
+  const handleDenyJoinRequest = async (requestId: string, requesterName: string, requesterId: string, serverName: string) => {
+    try {
+      // Update request status to denied
+      await updateDoc(doc(db, "serverJoinRequests", requestId), {
+        status: "denied",
+        respondedAt: new Date(),
+      });
+
+      // Send DM notification to the requester
+      const soulConversationId = `soul_${requesterId}`;
+
+      // Create the Soul conversation if it doesn't exist
+      await setDoc(doc(db, "conversations", soulConversationId), {
+        id: soulConversationId,
+        type: "bot_dm",
+        userId: requesterId,
+        createdAt: Date.now(),
+      });
+
+      // Send the denial message from Soul
+      const denialMessage = {
+        id: `msg_${Date.now()}`,
+        conversationId: soulConversationId,
+        senderId: "soul_bot",
+        senderName: "Soul",
+        content: `❌ **Request Denied**\n\n${currentProfile?.name || "The server owner"} has denied your request to join their server "${serverName}".\n\nYou can try sending a new request later if you're still interested.`,
+        timestamp: Date.now(),
+        type: "text",
+      };
+
+      await setDoc(doc(db, "conversations", soulConversationId, "messages", denialMessage.id), denialMessage);
+
+      toast({
+        title: "Request Denied",
+        description: `${requesterName}'s request has been denied and notified`,
+      });
+    } catch (error) {
+      console.error("Error denying join request:", error);
+      toast({
+        title: "Error",
+        description: "Failed to deny request",
+        variant: "destructive",
+      });
+    }
+  };
+
   const handleSendMessage = async () => {
     if (message.trim()) {
       let conversationId = "";
@@ -1424,7 +1981,11 @@ const MainPage = () => {
       
       if (showDirectMessages && selectedFriend) {
         // Direct message: dm_{uid1}_{uid2}
-        conversationId = `dm_${getConversationId(selectedFriend.id)}`;
+        if (selectedFriend.id === 'soul_bot') {
+          conversationId = `soul_${currentProfileId}`;
+        } else {
+          conversationId = `dm_${getConversationId(selectedFriend.id)}`;
+        }
       } else if (!showDirectMessages && selectedChannel && selectedServer) {
         // Server channel message: server_{serverId}_channel_{channelId}
         conversationId = `server_${selectedServer}_channel_${selectedChannel}`;
@@ -2138,6 +2699,74 @@ const MainPage = () => {
         </Button>
       </div>
 
+      {/* Server Join Requests Section - Only visible to server owners */}
+      {serverJoinRequests.length > 0 && (
+        <div className="w-60 bg-card/50 backdrop-blur-sm border-r border-border border-t">
+          <div className="p-2">
+            <Button
+              variant="ghost"
+              className="w-full justify-between px-2 py-1 h-auto"
+              onClick={() => setShowFriendRequests(!showFriendRequests)}
+            >
+              <span className="text-xs font-semibold text-muted-foreground">
+                Server Requests
+              </span>
+              <span className="bg-primary text-primary-foreground text-xs rounded-full w-5 h-5 flex items-center justify-center">
+                {serverJoinRequests.length}
+              </span>
+            </Button>
+          </div>
+          {showFriendRequests && (
+            <div className="px-2 pb-2 space-y-2">
+              {serverJoinRequests.map((request) => (
+                <div key={request.id} className="bg-card/50 rounded p-2 space-y-2">
+                  <div className="flex items-center gap-2">
+                    <Avatar className="h-6 w-6">
+                      <AvatarImage src={request.requesterAvatar} />
+                      <AvatarFallback className="bg-primary text-primary-foreground text-xs">
+                        {request.requesterName.charAt(0).toUpperCase()}
+                      </AvatarFallback>
+                    </Avatar>
+                    <div className="flex-1 min-w-0">
+                      <p className="text-xs font-medium truncate">{request.requesterName}</p>
+                      <p className="text-xs text-muted-foreground">wants to join: {request.serverName}</p>
+                    </div>
+                  </div>
+                  <div className="flex gap-1">
+                    <Button
+                      size="sm"
+                      className="flex-1 h-7 text-xs"
+                      onClick={() => handleAcceptJoinRequest(
+                        request.id,
+                        request.requesterId,
+                        request.serverId,
+                        request.serverName,
+                        request.requesterName
+                      )}
+                    >
+                      Accept
+                    </Button>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="flex-1 h-7 text-xs"
+                      onClick={() => handleDenyJoinRequest(
+                        request.id,
+                        request.requesterName,
+                        request.requesterId,
+                        request.serverName
+                      )}
+                    >
+                      Deny
+                    </Button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
       {/* Direct Messages / Channels Sidebar */}
       <div className="w-60 bg-card/50 backdrop-blur-sm border-r border-border flex flex-col">
         {/* Sidebar Header */}
@@ -2240,28 +2869,55 @@ const MainPage = () => {
                     </div>
                   </div>
                 ))
-              ) : friends.length > 0 ? (
-                friends.map((friend) => (
-                  <div
-                    key={friend.id}
-                    onClick={() => setSelectedFriend(friend)}
-                    className={`flex items-center gap-3 p-2 rounded cursor-pointer transition-colors ${
-                      selectedFriend?.id === friend.id
-                        ? "bg-accent/50"
-                        : "hover:bg-accent/50"
-                    }`}
-                  >
-                    <Avatar className="h-8 w-8">
-                      <AvatarImage src={friend.avatar} />
-                      <AvatarFallback className="bg-primary text-primary-foreground text-xs">
-                        {getInitials(friend.name)}
-                      </AvatarFallback>
-                    </Avatar>
-                    <span className="text-sm">{friend.name}</span>
-                  </div>
-                ))
               ) : (
-                <p className="text-xs text-muted-foreground p-2">No friends yet</p>
+                <>
+                  {/* Soul Bot - Only show if there are messages */}
+                  {hasSoulMessages && (
+                    <div
+                      onClick={() => setSelectedFriend({ id: 'soul_bot', name: 'Soul', avatar: '' })}
+                      className={`flex items-center gap-3 p-2 rounded cursor-pointer transition-colors ${
+                        selectedFriend?.id === 'soul_bot'
+                          ? "bg-accent/50"
+                          : "hover:bg-accent/50"
+                      }`}
+                    >
+                      <Avatar className="h-8 w-8">
+                        <AvatarFallback className="bg-gradient-to-br from-purple-500 to-pink-500 text-white text-xs font-bold">
+                          S
+                        </AvatarFallback>
+                      </Avatar>
+                      <div className="flex items-center gap-2">
+                        <span className="text-sm font-medium">Soul</span>
+                        <div className="w-2 h-2 bg-green-500 rounded-full"></div>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Regular Friends */}
+                  {friends.length > 0 ? (
+                    friends.map((friend) => (
+                      <div
+                        key={friend.id}
+                        onClick={() => setSelectedFriend(friend)}
+                        className={`flex items-center gap-3 p-2 rounded cursor-pointer transition-colors ${
+                          selectedFriend?.id === friend.id
+                            ? "bg-accent/50"
+                            : "hover:bg-accent/50"
+                        }`}
+                      >
+                        <Avatar className="h-8 w-8">
+                          <AvatarImage src={friend.avatar} />
+                          <AvatarFallback className="bg-primary text-primary-foreground text-xs">
+                            {getInitials(friend.name)}
+                          </AvatarFallback>
+                        </Avatar>
+                        <span className="text-sm">{friend.name}</span>
+                      </div>
+                    ))
+                  ) : (
+                    <p className="text-xs text-muted-foreground p-2">No friends yet</p>
+                  )}
+                </>
               )}
             </div>
           </>
@@ -2403,7 +3059,11 @@ const MainPage = () => {
               let conversationId = "";
               
               if (showDirectMessages && selectedFriend) {
-                conversationId = `dm_${getConversationId(selectedFriend.id)}`;
+                if (selectedFriend.id === 'soul_bot') {
+                  conversationId = `soul_${currentProfileId}`;
+                } else {
+                  conversationId = `dm_${getConversationId(selectedFriend.id)}`;
+                }
               } else if (!showDirectMessages && selectedChannel && selectedServer) {
                 conversationId = `server_${selectedServer}_channel_${selectedChannel}`;
               }
@@ -3324,9 +3984,13 @@ const MainPage = () => {
                   >
                     <div className="flex items-center gap-2">
                       <Avatar className="h-6 w-6">
-                        <AvatarFallback className="text-xs">
-                          {getInitials(member.name || "User")}
-                        </AvatarFallback>
+                        {member.avatar ? (
+                          <AvatarImage src={member.avatar} />
+                        ) : (
+                          <AvatarFallback className="text-xs">
+                            {getInitials(member.name || "User")}
+                          </AvatarFallback>
+                        )}
                       </Avatar>
                       <span className="text-sm">{member.name || "Unknown User"}</span>
                     </div>
