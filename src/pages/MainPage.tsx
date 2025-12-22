@@ -6,7 +6,7 @@ import { ServerCreationDialog } from "@/components/ServerCreationDialog";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
-import { UserPlus, Users, Plus, Send, MessageSquare, ChevronDown, UserCheck, Settings, Layers, Copy, FileText, Image, Video, PieChart, Trash2, CheckSquare, X, Globe, Smile, Search, Reply, LogOut, MapPin } from "lucide-react";
+import { UserPlus, Users, Plus, Send, MessageSquare, ChevronDown, UserCheck, Settings, Layers, Copy, FileText, Image, Video, PieChart, Trash2, CheckSquare, X, Globe, Smile, Search, Reply, LogOut, MapPin, Calendar, DollarSign, Map as MapIcon } from "lucide-react";
 import { useTheme } from "next-themes";
 import { Separator } from "@/components/ui/separator";
 import {
@@ -16,6 +16,11 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import {
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+} from "@/components/ui/popover";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -799,7 +804,10 @@ const MainPage = () => {
               replyTo: data.replyTo,
               tripId: data.tripId,
             };
-          }).reverse(); // Reverse to show oldest first
+          });
+
+          // Sort by timestamp ascending to ensure correct order
+          firestoreMessages.sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0));
 
           // Update cache
           messagesCache.current.set(conversationId, firestoreMessages);
@@ -1678,7 +1686,8 @@ const MainPage = () => {
     }
 
     try {
-      const tripId = `trip_${Date.now()}`;
+      const tripCreationTime = Date.now(); // Capture creation time for message ordering
+      const tripId = `trip_${tripCreationTime}`;
       const categoryId = `cat_${Date.now()}`;
       const channelId = `channel_${Date.now()}`;
       const tripName = `Trip to ${tripDestination}`;
@@ -1771,7 +1780,7 @@ const MainPage = () => {
           // Send detailed trip info to the trip channel
           await sendTripInfoToChannel(newTrip);
           // Send announcement to general channel with join button
-          await sendTripAnnouncement(tripName, tripId, tripDestination);
+          await sendTripAnnouncement(tripName, tripId, tripDestination, tripCreationTime);
           // Auto-select the trip planning channel for the creator
           setSelectedChannel(channelId);
         }, 500);
@@ -1819,46 +1828,40 @@ const MainPage = () => {
     }
   };
 
-  // Function to send trip announcement to general channel
-  const sendTripAnnouncement = async (tripName: string, tripId: string, destination: string) => {
-    if (!selectedServer || !currentProfileId) return;
+  // Function to send trip announcement to the current channel
+  const sendTripAnnouncement = async (tripName: string, tripId: string, destination: string, tripCreationTime: number) => {
+    if (!selectedServer || !currentProfileId || !selectedChannel) return;
 
     try {
-      // Get the latest server data from Firestore
-      const serverRef = doc(db, "servers", selectedServer);
-      const serverDoc = await getDoc(serverRef);
+      // Send announcement to the CURRENT channel (where user created the trip)
+      const conversationId = `server_${selectedServer}_channel_${selectedChannel}`;
 
-      if (!serverDoc.exists()) return;
-
-      const serverData = serverDoc.data();
-      // Find the general channel (first non-hidden channel)
-      const generalChannel = serverData.channels?.find((c: any) => !c.isHidden);
-      if (!generalChannel) return;
-
-      const conversationId = `server_${selectedServer}_channel_${generalChannel.id}`;
-
-      // Create announcement message
-      const announcementMessage: Message = {
-        id: `msg_${Date.now()}`,
+      // Create the message data with the trip's creation time for proper ordering
+      const announcementData = {
+        id: `msg_${tripCreationTime}_${Math.random().toString(36).substring(2, 11)}`,
         conversationId,
         senderId: currentProfileId,
         senderName: currentProfile?.name || "Unknown",
-        content: `🎉 New trip created: **${tripName}** to ${destination}!\n\nClick the button below to join this amazing adventure!`,
-        timestamp: Date.now(),
+        content: `TRIP_ANNOUNCEMENT|${tripName}|${destination}`,
+        timestamp: tripCreationTime, // Use trip creation time for proper chronological ordering
         type: "text",
-        tripId: tripId, // Add tripId to identify this message
+        tripId: tripId,
       };
 
-      // Save the announcement message
+      // Ensure the conversation document exists
       await setDoc(doc(db, "conversations", conversationId), {
         id: conversationId,
         type: "server_channel",
         serverId: selectedServer,
-        channelId: generalChannel.id,
+        channelId: selectedChannel,
         createdAt: Date.now(),
-      });
+      }, { merge: true });
 
-      await setDoc(doc(db, "conversations", conversationId, "messages", announcementMessage.id), announcementMessage);
+      // Save the announcement message
+      await setDoc(doc(db, "conversations", conversationId, "messages", announcementData.id), announcementData);
+      console.log("Trip announcement sent to channel:", selectedChannel, "with timestamp:", tripCreationTime);
+
+      // The real-time listener will automatically pick up the new message and sort it correctly
     } catch (error) {
       console.error("Error sending trip announcement:", error);
     }
@@ -3402,6 +3405,128 @@ const MainPage = () => {
                           
                           {msg.type !== "photo" && msg.type !== "poll" && (
                             <>
+                              {/* Check if this is a trip announcement and format it as a card */}
+                              {msg.content.startsWith("TRIP_ANNOUNCEMENT|") ? (() => {
+                                const [, tripName, destination] = msg.content.split('|');
+
+                                // Component to fetch and display trip details
+                                const TripDetailsPopover = ({ tripId }: { tripId: string }) => {
+                                  const [trip, setTrip] = useState<any | null>(null);
+                                  const [loading, setLoading] = useState(false);
+
+                                  const fetchTripDetails = () => {
+                                    if (trip) return;
+                                    setLoading(true);
+                                    getDoc(doc(db, "trips", tripId))
+                                      .then((tripDoc) => {
+                                        if (tripDoc.exists()) {
+                                          setTrip(tripDoc.data());
+                                        }
+                                      })
+                                      .catch((error) => {
+                                        console.error("Error fetching trip details:", error);
+                                      })
+                                      .finally(() => {
+                                        setLoading(false);
+                                      });
+                                  };
+
+                                  return (
+                                    <Popover onOpenChange={(open) => { if (open) fetchTripDetails(); }}>
+                                      <PopoverTrigger asChild>
+                                        <Button
+                                          onClick={(e) => { e.stopPropagation(); handleJoinTrip(tripId); }}
+                                          className="bg-gradient-to-r from-teal-500 to-cyan-500 hover:from-teal-600 hover:to-cyan-600 text-white px-8 py-6 text-lg rounded-xl font-semibold shadow-md hover:shadow-lg transition-all duration-200 hover:scale-105"
+                                        >
+                                          <span className="mr-2">✈️</span>
+                                          Join Trip
+                                        </Button>
+                                      </PopoverTrigger>
+                                      <PopoverContent className="w-80 p-0" side="top" align="center">
+                                        <div className="bg-gradient-to-br from-teal-50 to-cyan-50 dark:from-gray-900 dark:to-gray-800 rounded-lg">
+                                          <div className="p-4 border-b border-teal-200 dark:border-gray-700">
+                                            <h4 className="font-semibold text-foreground flex items-center gap-2">
+                                              <MapPin className="h-4 w-4 text-teal-500" />
+                                              Trip Details
+                                            </h4>
+                                          </div>
+                                          <div className="p-4 space-y-3">
+                                            {loading ? (
+                                              <p className="text-sm text-muted-foreground">Loading...</p>
+                                            ) : trip ? (
+                                              <>
+                                                <div className="flex items-start gap-3">
+                                                  <MapPin className="h-4 w-4 text-teal-500 mt-0.5 flex-shrink-0" />
+                                                  <div>
+                                                    <p className="text-xs text-muted-foreground">Destination</p>
+                                                    <p className="text-sm font-medium">{trip.destination}</p>
+                                                  </div>
+                                                </div>
+                                                <div className="flex items-start gap-3">
+                                                  <Calendar className="h-4 w-4 text-teal-500 mt-0.5 flex-shrink-0" />
+                                                  <div>
+                                                    <p className="text-xs text-muted-foreground">Duration</p>
+                                                    <p className="text-sm font-medium">{trip.timeInterval}</p>
+                                                  </div>
+                                                </div>
+                                                <div className="flex items-start gap-3">
+                                                  <DollarSign className="h-4 w-4 text-teal-500 mt-0.5 flex-shrink-0" />
+                                                  <div>
+                                                    <p className="text-xs text-muted-foreground">Budget</p>
+                                                    <p className="text-sm font-medium">{trip.budget}</p>
+                                                  </div>
+                                                </div>
+                                                {trip.placesToVisit && (
+                                                  <div className="flex items-start gap-3">
+                                                    <MapIcon className="h-4 w-4 text-teal-500 mt-0.5 flex-shrink-0" />
+                                                    <div>
+                                                      <p className="text-xs text-muted-foreground">Places to Visit</p>
+                                                      <p className="text-sm font-medium">{trip.placesToVisit}</p>
+                                                    </div>
+                                                  </div>
+                                                )}
+                                                {trip.numberOfPeople && (
+                                                  <div className="flex items-start gap-3">
+                                                    <Users className="h-4 w-4 text-teal-500 mt-0.5 flex-shrink-0" />
+                                                    <div>
+                                                      <p className="text-xs text-muted-foreground">Group Size</p>
+                                                      <p className="text-sm font-medium">{trip.numberOfPeople} people</p>
+                                                    </div>
+                                                  </div>
+                                                )}
+                                              </>
+                                            ) : (
+                                              <p className="text-sm text-muted-foreground">No details available</p>
+                                            )}
+                                          </div>
+                                        </div>
+                                      </PopoverContent>
+                                    </Popover>
+                                  );
+                                };
+
+                                return (
+                                  <div className="bg-gradient-to-r from-teal-100 via-cyan-100 to-blue-100 dark:from-teal-900/50 dark:via-cyan-900/50 dark:to-blue-900/50 rounded-2xl p-6 border border-teal-300/50 dark:border-teal-700/50 shadow-lg">
+                                    <div className="space-y-5">
+                                      <div className="flex items-center gap-3">
+                                        <div className="h-14 w-14 rounded-full bg-gradient-to-br from-teal-400 to-cyan-500 flex items-center justify-center shadow-md">
+                                          <span className="text-2xl">✈️</span>
+                                        </div>
+                                        <div>
+                                          <h3 className="text-xl font-bold text-foreground">New trip created!</h3>
+                                          <p className="text-sm text-muted-foreground">Join the adventure</p>
+                                        </div>
+                                      </div>
+                                      <div className="pl-16">
+                                        <p className="text-3xl font-bold bg-gradient-to-r from-teal-600 to-cyan-600 dark:from-teal-400 dark:to-cyan-400 bg-clip-text text-transparent">{destination}</p>
+                                      </div>
+                                      {/* Join Trip Button with Popover */}
+                                      {msg.tripId && <TripDetailsPopover tripId={msg.tripId} />}
+                                    </div>
+                                  </div>
+                                );
+                              })() : (
+                              <>
                               {/* Check if this is a trip planning channel message and format it */}
                               {msg.content.includes("## 🌟") && msg.content.includes("**Destination:**") ? (
                                 <div className="bg-gradient-to-br from-teal-50 to-blue-50 dark:from-teal-950/20 dark:to-blue-950/20 rounded-lg p-4 border border-teal-200 dark:border-teal-800">
@@ -3476,6 +3601,8 @@ const MainPage = () => {
                                     Join Trip
                                   </Button>
                                 </div>
+                              )}
+                            </>
                               )}
                             </>
                           )}
