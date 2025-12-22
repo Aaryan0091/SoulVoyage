@@ -13,6 +13,7 @@ import {
   Dialog,
   DialogContent,
   DialogDescription,
+  DialogFooter,
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
@@ -182,6 +183,15 @@ const MainPage = () => {
   const [tripBudget, setTripBudget] = useState("");
   const [tripNumberOfPeople, setTripNumberOfPeople] = useState("");
   const [tripPlacesToVisit, setTripPlacesToVisit] = useState("");
+  const [deleteTripDialog, setDeleteTripDialog] = useState<{
+    isOpen: boolean;
+    tripId: string | null;
+    tripName: string;
+  }>({
+    isOpen: false,
+    tripId: null,
+    tripName: "",
+  });
   const [trips, setTrips] = useState<Trip[]>([]);
   const photoInputRef = useRef<HTMLInputElement>(null);
   const longPressTimerRef = useRef<NodeJS.Timeout | null>(null);
@@ -939,7 +949,6 @@ const MainPage = () => {
               id: docSnap.id,
               name: serverData.name,
               icon: serverData.icon,
-              isPublic: serverData.isPublic,
               channels: serverData.channels || [SERVER_DEFAULTS.defaultChannel],
               categories: serverData.categories || [SERVER_DEFAULTS.defaultCategory],
             };
@@ -1028,7 +1037,6 @@ const MainPage = () => {
           id: serverDoc.id,
           name: serverData.name,
           icon: serverData.icon,
-          isPublic: serverData.isPublic,
           channels: serverData.channels || [SERVER_DEFAULTS.defaultChannel],
           categories: serverData.categories || [SERVER_DEFAULTS.defaultCategory],
         };
@@ -1946,10 +1954,20 @@ const MainPage = () => {
       return;
     }
 
-    // Confirm deletion
-    const confirmed = window.confirm(`Are you sure you want to delete "${tripData.name}"? This action cannot be undone and will remove all trip data including the planning channel.`);
+    // Show confirmation dialog
+    setDeleteTripDialog({
+      isOpen: true,
+      tripId: tripId,
+      tripName: tripData.name,
+    });
+  };
 
-    if (!confirmed) return;
+  const confirmDeleteTrip = async () => {
+    const { tripId, tripName } = deleteTripDialog;
+    if (!tripId || !currentProfileId || !selectedServer) {
+      setDeleteTripDialog({ isOpen: false, tripId: null, tripName: "" });
+      return;
+    }
 
     try {
       // Note: We can't delete messages/conversations due to Firestore rules (delete: if false)
@@ -1961,8 +1979,8 @@ const MainPage = () => {
 
       if (serverDoc.exists()) {
         const serverData = serverDoc.data();
-        const updatedCategories = (serverData.categories || []).filter((c: Category) => c.id !== tripData.categoryId);
-        const updatedChannels = (serverData.channels || []).filter((c: Channel) => c.id !== tripData.channelId);
+        const updatedCategories = (serverData.categories || []).filter((c: Category) => c.tripId !== tripId);
+        const updatedChannels = (serverData.channels || []).filter((c: Channel) => c.tripId !== tripId);
 
         await updateDoc(serverRef, {
           categories: updatedCategories,
@@ -1971,20 +1989,15 @@ const MainPage = () => {
       }
 
       // Delete the trip document
-      await deleteDoc(tripRef);
+      await deleteDoc(doc(db, "trips", tripId));
 
       toast({
         title: "Trip Deleted",
-        description: `${tripData.name} has been deleted successfully`,
+        description: `${tripName} has been deleted successfully`,
       });
 
-      // If we were in the deleted channel, switch to general channel
-      if (selectedChannel === tripData.channelId) {
-        const generalChannel = currentServer?.channels?.find(c => !c.isHidden);
-        if (generalChannel) {
-          setSelectedChannel(generalChannel.id);
-        }
-      }
+      // Close the dialog
+      setDeleteTripDialog({ isOpen: false, tripId: null, tripName: "" });
     } catch (error) {
       console.error("Error deleting trip:", error);
       toast({
@@ -1992,8 +2005,11 @@ const MainPage = () => {
         description: "Failed to delete trip",
         variant: "destructive",
       });
+      setDeleteTripDialog({ isOpen: false, tripId: null, tripName: "" });
     }
   };
+
+  // Function to handle accepting join requests
 
   // Handle accepting a server join request
   const handleAcceptJoinRequest = async (requestId: string, requesterId: string, serverId: string, serverName: string, requesterName: string) => {
@@ -3409,122 +3425,83 @@ const MainPage = () => {
                               {msg.content.startsWith("TRIP_ANNOUNCEMENT|") ? (() => {
                                 const [, tripName, destination] = msg.content.split('|');
 
-                                // Component to fetch and display trip details
-                                const TripDetailsPopover = ({ tripId }: { tripId: string }) => {
+                                // Component to fetch and display trip with details
+                                const TripAnnouncement = ({ tripId }: { tripId: string }) => {
                                   const [trip, setTrip] = useState<any | null>(null);
-                                  const [loading, setLoading] = useState(false);
 
-                                  const fetchTripDetails = () => {
-                                    if (trip) return;
-                                    setLoading(true);
-                                    getDoc(doc(db, "trips", tripId))
-                                      .then((tripDoc) => {
-                                        if (tripDoc.exists()) {
-                                          setTrip(tripDoc.data());
-                                        }
-                                      })
-                                      .catch((error) => {
-                                        console.error("Error fetching trip details:", error);
-                                      })
-                                      .finally(() => {
-                                        setLoading(false);
-                                      });
-                                  };
+                                  useEffect(() => {
+                                    const fetchTripDetails = () => {
+                                      getDoc(doc(db, "trips", tripId))
+                                        .then((tripDoc) => {
+                                          if (tripDoc.exists()) {
+                                            setTrip(tripDoc.data());
+                                          }
+                                        })
+                                        .catch((error) => {
+                                          console.error("Error fetching trip details:", error);
+                                        });
+                                    };
+                                    fetchTripDetails();
+                                  }, [tripId]);
 
                                   return (
-                                    <Popover onOpenChange={(open) => { if (open) fetchTripDetails(); }}>
-                                      <PopoverTrigger asChild>
-                                        <Button
-                                          onClick={(e) => { e.stopPropagation(); handleJoinTrip(tripId); }}
-                                          className="bg-gradient-to-r from-teal-500 to-cyan-500 hover:from-teal-600 hover:to-cyan-600 text-white px-8 py-6 text-lg rounded-xl font-semibold shadow-md hover:shadow-lg transition-all duration-200 hover:scale-105"
-                                        >
-                                          <span className="mr-2">✈️</span>
-                                          Join Trip
-                                        </Button>
-                                      </PopoverTrigger>
-                                      <PopoverContent className="w-80 p-0" side="top" align="center">
-                                        <div className="bg-gradient-to-br from-teal-50 to-cyan-50 dark:from-gray-900 dark:to-gray-800 rounded-lg">
-                                          <div className="p-4 border-b border-teal-200 dark:border-gray-700">
-                                            <h4 className="font-semibold text-foreground flex items-center gap-2">
-                                              <MapPin className="h-4 w-4 text-teal-500" />
-                                              Trip Details
-                                            </h4>
+                                    <div className="bg-gradient-to-r from-teal-100 via-cyan-100 to-blue-100 dark:from-teal-900/50 dark:via-cyan-900/50 dark:to-blue-900/50 rounded-2xl p-6 border border-teal-300/50 dark:border-teal-700/50 shadow-lg">
+                                      <div className="space-y-5">
+                                        {/* Header */}
+                                        <div className="flex items-center gap-3">
+                                          <div className="h-14 w-14 rounded-full bg-gradient-to-br from-teal-400 to-cyan-500 flex items-center justify-center shadow-md">
+                                            <span className="text-2xl">✈️</span>
                                           </div>
-                                          <div className="p-4 space-y-3">
-                                            {loading ? (
-                                              <p className="text-sm text-muted-foreground">Loading...</p>
-                                            ) : trip ? (
-                                              <>
-                                                <div className="flex items-start gap-3">
-                                                  <MapPin className="h-4 w-4 text-teal-500 mt-0.5 flex-shrink-0" />
-                                                  <div>
-                                                    <p className="text-xs text-muted-foreground">Destination</p>
-                                                    <p className="text-sm font-medium">{trip.destination}</p>
-                                                  </div>
-                                                </div>
-                                                <div className="flex items-start gap-3">
-                                                  <Calendar className="h-4 w-4 text-teal-500 mt-0.5 flex-shrink-0" />
-                                                  <div>
-                                                    <p className="text-xs text-muted-foreground">Duration</p>
-                                                    <p className="text-sm font-medium">{trip.timeInterval}</p>
-                                                  </div>
-                                                </div>
-                                                <div className="flex items-start gap-3">
-                                                  <DollarSign className="h-4 w-4 text-teal-500 mt-0.5 flex-shrink-0" />
-                                                  <div>
-                                                    <p className="text-xs text-muted-foreground">Budget</p>
-                                                    <p className="text-sm font-medium">{trip.budget}</p>
-                                                  </div>
-                                                </div>
-                                                {trip.placesToVisit && (
-                                                  <div className="flex items-start gap-3">
-                                                    <MapIcon className="h-4 w-4 text-teal-500 mt-0.5 flex-shrink-0" />
-                                                    <div>
-                                                      <p className="text-xs text-muted-foreground">Places to Visit</p>
-                                                      <p className="text-sm font-medium">{trip.placesToVisit}</p>
-                                                    </div>
-                                                  </div>
-                                                )}
-                                                {trip.numberOfPeople && (
-                                                  <div className="flex items-start gap-3">
-                                                    <Users className="h-4 w-4 text-teal-500 mt-0.5 flex-shrink-0" />
-                                                    <div>
-                                                      <p className="text-xs text-muted-foreground">Group Size</p>
-                                                      <p className="text-sm font-medium">{trip.numberOfPeople} people</p>
-                                                    </div>
-                                                  </div>
-                                                )}
-                                              </>
-                                            ) : (
-                                              <p className="text-sm text-muted-foreground">No details available</p>
-                                            )}
+                                          <div>
+                                            <h3 className="text-xl font-bold text-foreground">New trip created!</h3>
+                                            <p className="text-sm text-muted-foreground">Join the adventure</p>
                                           </div>
                                         </div>
-                                      </PopoverContent>
-                                    </Popover>
+
+                                        {/* Destination */}
+                                        <div className="pl-16">
+                                          <p className="text-3xl font-bold bg-gradient-to-r from-teal-600 to-cyan-600 dark:from-teal-400 dark:to-cyan-400 bg-clip-text text-transparent">{destination}</p>
+                                        </div>
+
+                                        {/* Trip Details */}
+                                        {trip && (
+                                          <div className="pl-16 flex flex-col gap-3 text-sm">
+                                            <div className="flex items-center gap-2">
+                                              <Calendar className="h-4 w-4 text-teal-600 dark:text-teal-400" />
+                                              <span className="text-muted-foreground">Duration:</span>
+                                              <span className="font-medium">{trip.timeInterval}</span>
+                                            </div>
+                                            <div className="flex items-center gap-2">
+                                              <DollarSign className="h-4 w-4 text-teal-600 dark:text-teal-400" />
+                                              <span className="text-muted-foreground">Budget:</span>
+                                              <span className="font-medium">{trip.budget}</span>
+                                            </div>
+                                            {trip.placesToVisit && (
+                                              <div className="flex items-start gap-2">
+                                                <MapIcon className="h-4 w-4 text-teal-600 dark:text-teal-400 mt-0.5" />
+                                                <span className="text-muted-foreground">Places:</span>
+                                                <span className="font-medium">{trip.placesToVisit}</span>
+                                              </div>
+                                            )}
+                                          </div>
+                                        )}
+
+                                        {/* Join Trip Button */}
+                                        <div className="flex justify-center">
+                                          <Button
+                                            onClick={(e) => { e.stopPropagation(); handleJoinTrip(tripId); }}
+                                            className="bg-gradient-to-r from-teal-500 to-cyan-500 hover:from-teal-600 hover:to-cyan-600 text-white px-8 py-6 text-lg rounded-xl font-semibold shadow-md hover:shadow-lg transition-all duration-200 hover:scale-105"
+                                          >
+                                            <span className="mr-2">✈️</span>
+                                            Join Trip
+                                          </Button>
+                                        </div>
+                                      </div>
+                                    </div>
                                   );
                                 };
 
-                                return (
-                                  <div className="bg-gradient-to-r from-teal-100 via-cyan-100 to-blue-100 dark:from-teal-900/50 dark:via-cyan-900/50 dark:to-blue-900/50 rounded-2xl p-6 border border-teal-300/50 dark:border-teal-700/50 shadow-lg">
-                                    <div className="space-y-5">
-                                      <div className="flex items-center gap-3">
-                                        <div className="h-14 w-14 rounded-full bg-gradient-to-br from-teal-400 to-cyan-500 flex items-center justify-center shadow-md">
-                                          <span className="text-2xl">✈️</span>
-                                        </div>
-                                        <div>
-                                          <h3 className="text-xl font-bold text-foreground">New trip created!</h3>
-                                          <p className="text-sm text-muted-foreground">Join the adventure</p>
-                                        </div>
-                                      </div>
-                                      <div className="pl-16">
-                                        <p className="text-3xl font-bold bg-gradient-to-r from-teal-600 to-cyan-600 dark:from-teal-400 dark:to-cyan-400 bg-clip-text text-transparent">{destination}</p>
-                                      </div>
-                                      {/* Join Trip Button with Popover */}
-                                      {msg.tripId && <TripDetailsPopover tripId={msg.tripId} />}
-                                    </div>
-                                  </div>
-                                );
+                                return msg.tripId ? <TripAnnouncement tripId={msg.tripId} /> : null;
                               })() : (
                               <>
                               {/* Check if this is a trip planning channel message and format it */}
@@ -4463,6 +4440,31 @@ const MainPage = () => {
         </DialogContent>
       </Dialog>
 
+      {/* Delete Trip Confirmation Dialog */}
+      <Dialog open={deleteTripDialog.isOpen} onOpenChange={(open) => setDeleteTripDialog({ ...deleteTripDialog, isOpen: open })}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle className="text-xl">Delete Trip?</DialogTitle>
+            <DialogDescription>
+              Are you sure you want to delete "{deleteTripDialog.tripName}"? This action cannot be undone and will remove all trip data including the planning channel.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter className="gap-2">
+            <Button
+              variant="outline"
+              onClick={() => setDeleteTripDialog({ isOpen: false, tripId: null, tripName: "" })}
+            >
+              Cancel
+            </Button>
+            <Button
+              onClick={confirmDeleteTrip}
+              variant="destructive"
+            >
+              Delete Trip
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
     </div>
   );
