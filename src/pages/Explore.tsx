@@ -32,6 +32,20 @@ const Explore = () => {
   const [loading, setLoading] = useState(true);
   const [joiningServerId, setJoiningServerId] = useState<string | null>(null);
 
+  // Check if user came from main page and prevent refresh loop
+  useEffect(() => {
+    // Check if this is a direct load/refresh of explore page
+    const cameFromMain = sessionStorage.getItem('cameFromMain');
+
+    if (!cameFromMain) {
+      // If user didn't come from main page, redirect back
+      navigate("/main");
+    } else {
+      // Clear the flag so refresh will redirect
+      sessionStorage.removeItem('cameFromMain');
+    }
+  }, [navigate]);
+
   // Fetch servers from Firestore
   useEffect(() => {
     const fetchServers = async () => {
@@ -293,9 +307,13 @@ const Explore = () => {
                         </div>
                         <div className="flex items-center gap-1">
                           {server.isPublic ? (
-                            <Globe2 className="h-5 w-5 text-primary" title="Public Server" />
+                            <div title="Public Server">
+                              <Globe2 className="h-5 w-5 text-primary" />
+                            </div>
                           ) : (
-                            <Lock className="h-5 w-5 text-yellow-500" title="Private Server" />
+                            <div title="Private Server">
+                              <Lock className="h-5 w-5 text-yellow-500" />
+                            </div>
                           )}
                         </div>
                       </div>

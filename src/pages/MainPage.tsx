@@ -30,7 +30,7 @@ import { Label } from "@/components/ui/label";
 import { useToast } from "@/hooks/use-toast";
 import { useAuth } from "@/context/AuthContext";
 import { db, auth } from "@/lib/firebase";
-import { collection, addDoc, query, where, orderBy, onSnapshot, Timestamp, getDoc, doc, updateDoc, deleteDoc, setDoc, getDocs } from "firebase/firestore";
+import { collection, addDoc, query, where, orderBy, onSnapshot, Timestamp, getDoc, doc, updateDoc, deleteDoc, setDoc, getDocs, limit } from "firebase/firestore";
 import { SERVER_DEFAULTS } from "@/utils/constants";
 import Picker from "emoji-picker-react";
 
@@ -274,18 +274,21 @@ const MainPage = () => {
       const soulMessages: Message[] = [];
       snapshot.forEach((doc) => {
         const data = doc.data();
-        soulMessages.push({
-          id: doc.id,
-          senderId: data.senderId,
-          senderName: data.senderName,
-          content: data.content,
-          timestamp: data.timestamp,
-          conversationId: soulConversationId,
-          type: data.type,
-        });
+        // Only count actual messages from Soul bot, not system messages or empty messages
+        if (data.senderId === 'soul_bot' && data.content && data.content.trim()) {
+          soulMessages.push({
+            id: doc.id,
+            senderId: data.senderId,
+            senderName: data.senderName,
+            content: data.content,
+            timestamp: data.timestamp,
+            conversationId: soulConversationId,
+            type: data.type,
+          });
+        }
       });
 
-      // Update hasSoulMessages flag
+      // Update hasSoulMessages flag - only true if there are actual Soul messages
       setHasSoulMessages(soulMessages.length > 0);
 
       // Update messages state with Soul messages
@@ -294,6 +297,8 @@ const MainPage = () => {
         const filtered = prevMessages.filter(m => m.conversationId !== soulConversationId);
         return [...filtered, ...soulMessages];
       });
+
+      console.log("Soul messages count:", soulMessages.length, "hasSoulMessages:", soulMessages.length > 0);
     });
 
     return () => unsubscribe();
@@ -706,7 +711,10 @@ const MainPage = () => {
     return convId;
   };
 
-  // Load messages from Firestore for current conversation
+  // In-memory cache for messages
+  const messagesCache = useRef<Map<string, Message[]>>(new Map());
+
+  // Load messages from Firestore for current conversation with caching
   useEffect(() => {
     let conversationId = "";
 
@@ -729,6 +737,27 @@ const MainPage = () => {
 
     const setupConversationListener = async () => {
       try {
+        // Check cache first
+        if (messagesCache.current.has(conversationId)) {
+          const cachedMessages = messagesCache.current.get(conversationId)!;
+          setMessages(cachedMessages);
+          console.log("Loaded", cachedMessages.length, "messages from cache for", conversationId);
+        }
+
+        // Also check localStorage
+        const localStorageKey = `messages_${conversationId}`;
+        const cachedMessages = localStorage.getItem(localStorageKey);
+        if (cachedMessages && !messagesCache.current.has(conversationId)) {
+          try {
+            const parsed = JSON.parse(cachedMessages);
+            messagesCache.current.set(conversationId, parsed);
+            setMessages(parsed);
+            console.log("Loaded", parsed.length, "messages from localStorage for", conversationId);
+          } catch (e) {
+            console.error("Error parsing cached messages:", e);
+          }
+        }
+
         // Always ensure the conversation document exists first
         const conversationRef = doc(db, "conversations", conversationId);
         const conversationDoc = await getDoc(conversationRef);
@@ -745,9 +774,9 @@ const MainPage = () => {
           });
         }
 
-        // Set up the messages listener with no limit for now
+        // Set up the messages listener with limit for initial load
         const messagesRef = collection(db, "conversations", conversationId, "messages");
-        const q = query(messagesRef, orderBy("timestamp", "asc"));
+        const q = query(messagesRef, orderBy("timestamp", "desc"), limit(50));
 
         unsubscribeRef.current = onSnapshot(q, (snapshot) => {
           const firestoreMessages = snapshot.docs.map((doc) => {
@@ -767,11 +796,19 @@ const MainPage = () => {
               replyTo: data.replyTo,
               tripId: data.tripId,
             };
-          });
+          }).reverse(); // Reverse to show oldest first
+
+          // Update cache
+          messagesCache.current.set(conversationId, firestoreMessages);
+
+          // Update localStorage (keep only last 50 messages to save space)
+          try {
+            localStorage.setItem(localStorageKey, JSON.stringify(firestoreMessages));
+          } catch (e) {
+            console.error("Error saving messages to localStorage:", e);
+          }
 
           console.log("Setting messages state:", firestoreMessages.length, "messages for", conversationId);
-          console.log("First message:", firestoreMessages[0]);
-          // Set messages directly for this conversation
           setMessages(firestoreMessages);
         }, (error) => {
           console.error("Error in messages listener:", error);
@@ -906,30 +943,39 @@ const MainPage = () => {
 
   // Restore last selected server/channel
   useEffect(() => {
-    if (!servers || servers.length === 0) return;
+    // On initial load, always start with DMs selected and no server selected
+    setShowDirectMessages(true);
+    setSelectedServer(null);
+    setSelectedChannel(null);
 
-    const lastServerId = localStorage.getItem(`lastServer_${currentProfileId}`);
-    const lastChannelId = localStorage.getItem(`lastChannel_${currentProfileId}`);
-
-    if (lastServerId && servers.find(s => s.id === lastServerId)) {
-      setSelectedServer(lastServerId);
-      if (lastChannelId && servers.find(s => s.id === lastServerId)?.channels?.find(c => c.id === lastChannelId)) {
-        setSelectedChannel(lastChannelId);
-      } else {
-        // Select first channel if no last channel
-        const server = servers.find(s => s.id === lastServerId);
-        if (server?.channels?.length) {
-          setSelectedChannel(server.channels[0].id);
+    // Preload frequently accessed data in the background
+    if (currentProfileId) {
+      const preloadData = async () => {
+        // Preload first server's data if available
+        const cachedServers = localStorage.getItem(`servers_${currentProfileId}`);
+        if (cachedServers) {
+          try {
+            const servers = JSON.parse(cachedServers);
+            if (servers.length > 0) {
+              // Preload first server channels for instant access when switching
+              const firstServer = servers[0];
+              const serverRef = doc(db, "servers", firstServer.id);
+              await getDoc(serverRef);
+            }
+          } catch (e) {
+            console.error("Error preloading server data:", e);
+          }
         }
-      }
-    } else if (servers.length > 0) {
-      // Auto-select first server
-      setSelectedServer(servers[0].id);
-      if (servers[0].channels?.length) {
-        setSelectedChannel(servers[0].channels[0].id);
+      };
+
+      // Use requestIdleCallback for non-critical preloading
+      if (window.requestIdleCallback) {
+        window.requestIdleCallback(preloadData, { timeout: 3000 });
+      } else {
+        setTimeout(preloadData, 2000);
       }
     }
-  }, [servers, currentProfileId]);
+  }, [currentProfileId]);
 
   // Save selected server/channel to localStorage
   useEffect(() => {
@@ -2642,7 +2688,10 @@ const MainPage = () => {
         <Button
           variant="ghost"
           size="icon"
-          onClick={() => navigate("/explore")}
+          onClick={() => {
+            sessionStorage.setItem('cameFromMain', 'true');
+            navigate("/explore");
+          }}
           className="w-12 h-12 rounded-2xl bg-card hover:bg-accent hover:rounded-xl transition-all"
         >
           <Globe className="h-6 w-6 text-primary" />
