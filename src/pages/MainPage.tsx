@@ -30,7 +30,7 @@ import { Label } from "@/components/ui/label";
 import { useToast } from "@/hooks/use-toast";
 import { useAuth } from "@/context/AuthContext";
 import { db, auth } from "@/lib/firebase";
-import { collection, addDoc, query, where, orderBy, onSnapshot, Timestamp, getDoc, doc, updateDoc, deleteDoc, setDoc, getDocs, limit } from "firebase/firestore";
+import { collection, addDoc, query, where, orderBy, onSnapshot, Timestamp, getDoc, doc, updateDoc, deleteDoc, setDoc, getDocs, limit, writeBatch } from "firebase/firestore";
 import { SERVER_DEFAULTS } from "@/utils/constants";
 import Picker from "emoji-picker-react";
 
@@ -714,6 +714,9 @@ const MainPage = () => {
   // In-memory cache for messages
   const messagesCache = useRef<Map<string, Message[]>>(new Map());
 
+  // In-memory cache for trips
+  const tripsCache = useRef<Map<string, Trip[]>>(new Map());
+
   // Load messages from Firestore for current conversation with caching
   useEffect(() => {
     let conversationId = "";
@@ -829,11 +832,33 @@ const MainPage = () => {
     };
   }, [selectedFriend?.id, selectedChannel, showDirectMessages, selectedServer, currentProfileId]);
 
-  // Load trips from Firestore for current server
+  // Load trips from Firestore for current server with caching
   useEffect(() => {
     if (!selectedServer) {
       setTrips([]);
       return;
+    }
+
+    // Check in-memory cache first
+    if (tripsCache.current.has(selectedServer)) {
+      const cachedTrips = tripsCache.current.get(selectedServer)!;
+      setTrips(cachedTrips);
+      console.log(`Loaded ${cachedTrips.length} trips from memory cache for server ${selectedServer}`);
+      return; // Skip Firestore if cached
+    }
+
+    // Then check localStorage
+    const tripsCacheKey = `trips_${selectedServer}`;
+    const cachedTrips = localStorage.getItem(tripsCacheKey);
+    if (cachedTrips) {
+      try {
+        const parsed = JSON.parse(cachedTrips);
+        setTrips(parsed);
+        tripsCache.current.set(selectedServer, parsed);
+        console.log(`Loaded ${parsed.length} trips from localStorage cache for server ${selectedServer}`);
+      } catch (e) {
+        console.error("Error parsing cached trips:", e);
+      }
     }
 
     try {
@@ -848,7 +873,13 @@ const MainPage = () => {
           id: doc.id,
           ...doc.data()
         })) as Trip[];
+
         setTrips(firebaseTrips);
+
+        // Update both caches
+        tripsCache.current.set(selectedServer, firebaseTrips);
+        localStorage.setItem(tripsCacheKey, JSON.stringify(firebaseTrips));
+        console.log(`Updated ${firebaseTrips.length} trips in all caches for server ${selectedServer}`);
       });
 
       return () => unsubscribeTrips();
@@ -1665,17 +1696,32 @@ const MainPage = () => {
         const currentCategories = serverDoc.data().categories || [];
         const currentChannels = serverDoc.data().channels || [];
 
+        // Optimistic update - update UI immediately
+        const updatedTrips = [...trips, newTrip];
+        setTrips(updatedTrips);
+
+        // Update cache immediately
+        const tripsCacheKey = `trips_${selectedServer}`;
+        localStorage.setItem(tripsCacheKey, JSON.stringify(updatedTrips));
+
+        // Use batch write for atomic operations
+        const batch = writeBatch(db);
+
         // Update server with new category and channel
-        await updateDoc(serverRef, {
+        batch.update(serverRef, {
           categories: [...currentCategories, newCategory],
           channels: [...currentChannels, newChannel],
         });
 
         // Save trip data to a separate collection
-        await setDoc(doc(db, "trips", tripId), {
+        const tripRef = doc(db, "trips", tripId);
+        batch.set(tripRef, {
           ...newTrip,
           serverId: selectedServer,
         });
+
+        // Commit batch
+        await batch.commit();
 
         // Reset form
         setTripDestination("");
@@ -3335,14 +3381,76 @@ const MainPage = () => {
                           
                           {msg.type !== "photo" && msg.type !== "poll" && (
                             <>
-                              <p className="break-words">{msg.content}</p>
+                              {/* Check if this is a trip planning channel message and format it */}
+                              {msg.content.includes("## 🌟") && msg.content.includes("**Destination:**") ? (
+                                <div className="bg-gradient-to-br from-teal-50 to-blue-50 dark:from-teal-950/20 dark:to-blue-950/20 rounded-lg p-4 border border-teal-200 dark:border-teal-800">
+                                  <div className="space-y-3">
+                                    <h3 className="text-lg font-bold text-teal-700 dark:text-teal-300 text-center">
+                                      🌟 New Trip Created! 🌟
+                                    </h3>
+                                    <div className="space-y-2 text-sm">
+                                      {msg.content.split('\n').map((line, idx) => {
+                                        if (line.startsWith('**Destination:**')) {
+                                          return (
+                                            <div key={idx} className="flex items-center gap-2">
+                                              <span className="font-semibold">📍</span>
+                                              <span><span className="font-medium">Destination:</span> {line.split(':')[1]?.trim()}</span>
+                                            </div>
+                                          );
+                                        } else if (line.startsWith('**Duration:**')) {
+                                          return (
+                                            <div key={idx} className="flex items-center gap-2">
+                                              <span className="font-semibold">📅</span>
+                                              <span><span className="font-medium">Duration:</span> {line.split(':')[1]?.trim()}</span>
+                                            </div>
+                                          );
+                                        } else if (line.startsWith('**Budget:**')) {
+                                          return (
+                                            <div key={idx} className="flex items-center gap-2">
+                                              <span className="font-semibold">💰</span>
+                                              <span><span className="font-medium">Budget:</span> {line.split(':')[1]?.trim()}</span>
+                                            </div>
+                                          );
+                                        } else if (line.startsWith('**Group Size:**')) {
+                                          return (
+                                            <div key={idx} className="flex items-center gap-2">
+                                              <span className="font-semibold">👥</span>
+                                              <span><span className="font-medium">Group Size:</span> {line.split(':')[1]?.trim()}</span>
+                                            </div>
+                                          );
+                                        } else if (line.startsWith('**Places to Visit:**')) {
+                                          return (
+                                            <div key={idx} className="space-y-1">
+                                              <div className="flex items-center gap-2">
+                                                <span className="font-semibold">🏝️</span>
+                                                <span className="font-medium">Places to Visit:</span>
+                                              </div>
+                                              <p className="ml-7 text-foreground/80">{line.split(':')[1]?.trim()}</p>
+                                            </div>
+                                          );
+                                        } else if (line.includes('private trip planning channel')) {
+                                          return (
+                                            <div key={idx} className="mt-4 pt-3 border-t border-teal-200 dark:border-teal-800 text-center">
+                                              <p className="text-xs text-foreground/80">💬 This is your private trip planning channel. Start discussing your travel plans here!</p>
+                                            </div>
+                                          );
+                                        }
+                                        return null;
+                                      })}
+                                    </div>
+                                  </div>
+                                </div>
+                              ) : (
+                                <p className="break-words whitespace-pre-wrap">{msg.content}</p>
+                              )}
+
                               {/* Show join button for trip announcements */}
                               {msg.tripId && (
                                 <div className="mt-3 pt-3 border-t border-current/20">
                                   <Button
                                     size="sm"
                                     onClick={() => handleJoinTrip(msg.tripId!)}
-                                    className="bg-primary/20 hover:bg-primary/30 text-primary border border-primary/30"
+                                    className="bg-teal-500 hover:bg-teal-600 text-white"
                                   >
                                     Join Trip
                                   </Button>
