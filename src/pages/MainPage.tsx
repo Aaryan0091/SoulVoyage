@@ -839,18 +839,17 @@ const MainPage = () => {
       return;
     }
 
-    // Check in-memory cache first
+    // Check in-memory cache first and load it immediately
     if (tripsCache.current.has(selectedServer)) {
       const cachedTrips = tripsCache.current.get(selectedServer)!;
       setTrips(cachedTrips);
       console.log(`Loaded ${cachedTrips.length} trips from memory cache for server ${selectedServer}`);
-      return; // Skip Firestore if cached
     }
 
     // Then check localStorage
     const tripsCacheKey = `trips_${selectedServer}`;
     const cachedTrips = localStorage.getItem(tripsCacheKey);
-    if (cachedTrips) {
+    if (cachedTrips && !tripsCache.current.has(selectedServer)) {
       try {
         const parsed = JSON.parse(cachedTrips);
         setTrips(parsed);
@@ -861,6 +860,7 @@ const MainPage = () => {
       }
     }
 
+    // Always set up the Firestore listener for real-time updates
     try {
       const tripsRef = collection(db, "trips");
       const q = query(
@@ -1007,6 +1007,35 @@ const MainPage = () => {
       }
     }
   }, [currentProfileId]);
+
+  // Real-time listener for the selected server to keep categories/channels in sync
+  useEffect(() => {
+    if (!selectedServer) return;
+
+    const serverRef = doc(db, "servers", selectedServer);
+    const unsubscribe = onSnapshot(serverRef, (serverDoc) => {
+      if (serverDoc.exists()) {
+        const serverData = serverDoc.data();
+        const updatedServer: Server = {
+          id: serverDoc.id,
+          name: serverData.name,
+          icon: serverData.icon,
+          isPublic: serverData.isPublic,
+          channels: serverData.channels || [SERVER_DEFAULTS.defaultChannel],
+          categories: serverData.categories || [SERVER_DEFAULTS.defaultCategory],
+        };
+
+        // Update the servers state with the latest server data
+        setServers(prevServers =>
+          prevServers.map(s => s.id === selectedServer ? updatedServer : s)
+        );
+      }
+    }, (error) => {
+      console.error("Error listening to server updates:", error);
+    });
+
+    return () => unsubscribe();
+  }, [selectedServer]);
 
   // Save selected server/channel to localStorage
   useEffect(() => {
@@ -1700,7 +1729,8 @@ const MainPage = () => {
         const updatedTrips = [...trips, newTrip];
         setTrips(updatedTrips);
 
-        // Update cache immediately
+        // Update both caches immediately
+        tripsCache.current.set(selectedServer, updatedTrips);
         const tripsCacheKey = `trips_${selectedServer}`;
         localStorage.setItem(tripsCacheKey, JSON.stringify(updatedTrips));
 
@@ -1919,17 +1949,8 @@ const MainPage = () => {
     if (!confirmed) return;
 
     try {
-      // Delete all messages in the trip channel
-      const conversationId = `server_${selectedServer}_channel_${tripData.channelId}`;
-      const messagesRef = collection(db, "conversations", conversationId, "messages");
-      const messagesSnapshot = await getDocs(messagesRef);
-
-      for (const msgDoc of messagesSnapshot.docs) {
-        await deleteDoc(msgDoc.ref);
-      }
-
-      // Delete the conversation collection
-      await deleteDoc(doc(db, "conversations", conversationId));
+      // Note: We can't delete messages/conversations due to Firestore rules (delete: if false)
+      // We only remove the category, channel from server, and delete the trip document
 
       // Remove the category and channel from the server
       const serverRef = doc(db, "servers", selectedServer);
@@ -3922,12 +3943,12 @@ const MainPage = () => {
                 const currentUserId = currentProfileId;
                 
                 if (isDeletingBulk) {
-                  // Check if all selected messages are owned by current user
+                  // Check if all selected messages are owned by current user and not already deleted for everyone
                   const allMessagesOwnedByUser = Array.from(selectedMessages).every(msgId => {
                     const msg = messages.find(m => m.id === msgId);
-                    return msg?.senderId === currentUserId;
+                    return msg?.senderId === currentUserId && !msg?.deletedForEveryone;
                   });
-                  
+
                   if (allMessagesOwnedByUser) {
                     return `Choose how you want to delete these ${selectedMessages.size} messages.`;
                   } else {
@@ -3936,8 +3957,11 @@ const MainPage = () => {
                 } else {
                   const message = messageToDelete ? messages.find(m => m.id === messageToDelete) : null;
                   const isMessageOwner = message?.senderId === currentUserId;
-                  
-                  if (isMessageOwner) {
+                  const alreadyDeletedForEveryone = message?.deletedForEveryone;
+
+                  if (alreadyDeletedForEveryone) {
+                    return "This message is already deleted for everyone. You can only delete it for yourself.";
+                  } else if (isMessageOwner) {
                     return "Choose how you want to delete this message.";
                   } else {
                     return "Delete this message for yourself.";
@@ -3963,12 +3987,12 @@ const MainPage = () => {
               const currentUserId = currentProfileId;
               
               if (isDeletingBulk) {
-                // Check if all selected messages are owned by current user
+                // Check if all selected messages are owned by current user and not already deleted for everyone
                 const allMessagesOwnedByUser = Array.from(selectedMessages).every(msgId => {
                   const msg = messages.find(m => m.id === msgId);
-                  return msg?.senderId === currentUserId;
+                  return msg?.senderId === currentUserId && !msg?.deletedForEveryone;
                 });
-                
+
                 return allMessagesOwnedByUser && (
                   <Button
                     onClick={async () => {
@@ -4013,8 +4037,8 @@ const MainPage = () => {
               } else {
                 const message = messageToDelete ? messages.find(m => m.id === messageToDelete) : null;
                 const isMessageOwner = message?.senderId === currentUserId;
-                
-                return isMessageOwner && (
+
+                return isMessageOwner && !message?.deletedForEveryone && (
                   <Button
                     onClick={() => {
                       if (messageToDelete) {
