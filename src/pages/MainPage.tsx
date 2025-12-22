@@ -101,6 +101,11 @@ interface Message {
     senderName: string;
     content: string;
   };
+  tripDetails?: {
+    timeInterval: string;
+    budget: string;
+    placesToVisit: string;
+  };
 }
 
 interface Server {
@@ -813,6 +818,7 @@ const MainPage = () => {
               deletedFor: data.deletedFor,
               replyTo: data.replyTo,
               tripId: data.tripId,
+              tripDetails: data.tripDetails,
             };
           });
 
@@ -1788,7 +1794,7 @@ const MainPage = () => {
           // Send detailed trip info to the trip channel
           await sendTripInfoToChannel(newTrip);
           // Send announcement to general channel with join button
-          await sendTripAnnouncement(tripName, tripId, tripDestination, tripCreationTime);
+          await sendTripAnnouncement(tripName, tripId, tripDestination, tripCreationTime, tripTimeInterval, tripBudget, tripPlacesToVisit);
           // Auto-select the trip planning channel for the creator
           setSelectedChannel(channelId);
         }, 500);
@@ -1837,7 +1843,7 @@ const MainPage = () => {
   };
 
   // Function to send trip announcement to the current channel
-  const sendTripAnnouncement = async (tripName: string, tripId: string, destination: string, tripCreationTime: number) => {
+  const sendTripAnnouncement = async (tripName: string, tripId: string, destination: string, tripCreationTime: number, timeInterval: string, budget: string, placesToVisit: string) => {
     if (!selectedServer || !currentProfileId || !selectedChannel) return;
 
     try {
@@ -1854,6 +1860,12 @@ const MainPage = () => {
         timestamp: tripCreationTime, // Use trip creation time for proper chronological ordering
         type: "text",
         tripId: tripId,
+        // Store trip details in message so they persist even after trip deletion
+        tripDetails: {
+          timeInterval,
+          budget,
+          placesToVisit,
+        },
       };
 
       // Ensure the conversation document exists
@@ -3425,11 +3437,23 @@ const MainPage = () => {
                               {msg.content.startsWith("TRIP_ANNOUNCEMENT|") ? (() => {
                                 const [, tripName, destination] = msg.content.split('|');
 
-                                // Component to fetch and display trip with details
-                                const TripAnnouncement = ({ tripId }: { tripId: string }) => {
+                                // Component to display trip announcement with details
+                                const TripAnnouncement = ({ tripId, tripDetails }: { tripId: string; tripDetails?: { timeInterval: string; budget: string; placesToVisit: string } }) => {
                                   const [trip, setTrip] = useState<any | null>(null);
 
                                   useEffect(() => {
+                                    // If tripDetails are already in the message, use them
+                                    // Otherwise, fetch from the trips collection (for old messages)
+                                    if (tripDetails) {
+                                      setTrip({
+                                        timeInterval: tripDetails.timeInterval,
+                                        budget: tripDetails.budget,
+                                        placesToVisit: tripDetails.placesToVisit,
+                                      });
+                                      return;
+                                    }
+
+                                    // Fallback: fetch from trips collection for old messages
                                     const fetchTripDetails = () => {
                                       getDoc(doc(db, "trips", tripId))
                                         .then((tripDoc) => {
@@ -3442,7 +3466,7 @@ const MainPage = () => {
                                         });
                                     };
                                     fetchTripDetails();
-                                  }, [tripId]);
+                                  }, [tripId, tripDetails]);
 
                                   return (
                                     <div className="bg-gradient-to-r from-teal-100 via-cyan-100 to-blue-100 dark:from-teal-900/50 dark:via-cyan-900/50 dark:to-blue-900/50 rounded-2xl p-6 border border-teal-300/50 dark:border-teal-700/50 shadow-lg">
@@ -3501,7 +3525,7 @@ const MainPage = () => {
                                   );
                                 };
 
-                                return msg.tripId ? <TripAnnouncement tripId={msg.tripId} /> : null;
+                                return msg.tripId ? <TripAnnouncement tripId={msg.tripId} tripDetails={msg.tripDetails} /> : null;
                               })() : (
                               <>
                               {/* Check if this is a trip planning channel message and format it */}
