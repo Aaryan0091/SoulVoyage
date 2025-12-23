@@ -164,6 +164,8 @@ const MainPage = () => {
   const [isFriendsLoading, setIsFriendsLoading] = useState(true);
   const [messages, setMessages] = useState<Message[]>([]);
   const [hasSoulMessages, setHasSoulMessages] = useState(false);
+  const [unreadSoulCount, setUnreadSoulCount] = useState(0);
+  const [unreadDMCounts, setUnreadDMCounts] = useState<Map<string, number>>(new Map());
   const [showPollDialog, setShowPollDialog] = useState(false);
   const [pollTitle, setPollTitle] = useState("");
   const [pollOptions, setPollOptions] = useState(["", ""]);
@@ -201,6 +203,7 @@ const MainPage = () => {
   const photoInputRef = useRef<HTMLInputElement>(null);
   const longPressTimerRef = useRef<NodeJS.Timeout | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const messagesContainerRef = useRef<HTMLDivElement>(null);
   const currentProfileName = currentProfile?.name || "You";
   const currentProfileId = user?.uid || null; // Use Firebase Auth UID
   const customUserId = currentProfile?.userId || null; // Custom display ID for friend requests
@@ -277,52 +280,187 @@ const MainPage = () => {
   const [servers, setServers] = useState<Server[]>([]);
   const [isServersLoading, setIsServersLoading] = useState(true);
 
+  // Function to scroll to bottom of messages
+  const scrollToBottom = (immediate = false) => {
+    setTimeout(() => {
+      if (messagesContainerRef.current) {
+        messagesContainerRef.current.scrollTo({
+          top: messagesContainerRef.current.scrollHeight,
+          behavior: immediate ? "auto" : "smooth"
+        });
+      } else if (messagesEndRef.current) {
+        messagesEndRef.current.scrollIntoView({ behavior: immediate ? "auto" : "smooth" });
+      }
+    }, immediate ? 0 : 100);
+  };
+
   // Auto-scroll to bottom when new messages arrive
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+    scrollToBottom();
   }, [messages]);
 
-  // Listen for Soul bot messages
+  // Scroll to bottom when conversation changes (server/channel or DM)
   useEffect(() => {
-    if (!currentProfileId) return;
+    scrollToBottom(false);
+  }, [selectedChannel, selectedFriend, showDirectMessages]);
+
+  // Listen for Soul bot messages (only for unread indicator - main listener handles actual messages)
+  useEffect(() => {
+    if (!currentProfileId) {
+      console.log("Soul listener: No currentProfileId, skipping");
+      return;
+    }
 
     const soulConversationId = `soul_${currentProfileId}`;
+    console.log("Soul listener: Setting up listener for", soulConversationId);
     const messagesRef = collection(db, "conversations", soulConversationId, "messages");
     const q = query(messagesRef, orderBy("timestamp", "asc"));
 
     const unsubscribe = onSnapshot(q, (snapshot) => {
-      const soulMessages: Message[] = [];
-      snapshot.forEach((doc) => {
-        const data = doc.data();
-        // Only count actual messages from Soul bot, not system messages or empty messages
-        if (data.senderId === 'soul_bot' && data.content && data.content.trim()) {
-          soulMessages.push({
-            id: doc.id,
-            senderId: data.senderId,
-            senderName: data.senderName,
-            content: data.content,
-            timestamp: data.timestamp,
-            conversationId: soulConversationId,
-            type: data.type,
+      console.log("Soul listener: Snapshot received, docs:", snapshot.docs.length);
+
+      const hasMessages = snapshot.docs.length > 0;
+      setHasSoulMessages(hasMessages);
+
+      // Only calculate unread if Soul is NOT the currently selected conversation
+      const isSoulSelected = selectedFriend?.id === 'soul_bot';
+
+      if (!isSoulSelected) {
+        // Calculate unread Soul messages
+        const lastReadKey = `lastRead_soul_${currentProfileId}`;
+        const lastReadTimestamp = localStorage.getItem(lastReadKey);
+        const lastRead = lastReadTimestamp ? parseInt(lastReadTimestamp) : 0;
+
+        let unreadCount = 0;
+        snapshot.forEach((doc) => {
+          const data = doc.data();
+          const msgTimestamp = data.timestamp?.toMillis ? data.timestamp.toMillis() : data.timestamp;
+          // Count messages from Soul (not from current user) that are newer than last read
+          if (data.senderId !== currentProfileId && msgTimestamp > lastRead) {
+            unreadCount++;
+          }
+        });
+
+        setUnreadSoulCount(unreadCount);
+        console.log("Soul messages count:", snapshot.docs.length, "hasMessages:", hasMessages, "unreadCount:", unreadCount);
+      } else {
+        setUnreadSoulCount(0);
+        console.log("Soul messages count:", snapshot.docs.length, "hasMessages:", hasMessages, "unreadCount: 0 (Soul is selected)");
+      }
+    }, (error) => {
+      console.error("Soul listener error:", error);
+    });
+
+    return () => unsubscribe();
+  }, [currentProfileId, selectedFriend]);
+
+  // Clear unread Soul messages when user opens Soul conversation
+  useEffect(() => {
+    if (selectedFriend?.id === 'soul_bot') {
+      const lastReadKey = `lastRead_soul_${currentProfileId}`;
+
+      // Update last read timestamp periodically while Soul DM is open
+      const interval = setInterval(() => {
+        localStorage.setItem(lastReadKey, Date.now().toString());
+      }, 1000);
+
+      // Set initial timestamp and clear unread count
+      localStorage.setItem(lastReadKey, Date.now().toString());
+      setUnreadSoulCount(0);
+
+      return () => {
+        clearInterval(interval);
+        // Update last read timestamp when leaving Soul conversation
+        localStorage.setItem(lastReadKey, Date.now().toString());
+      };
+    }
+  }, [selectedFriend, currentProfileId]);
+
+  // Track unread DM messages for each friend
+  useEffect(() => {
+    if (!currentProfileId || friends.length === 0) return;
+
+    const unsubscribeFunctions: (() => void)[] = [];
+
+    friends.forEach((friend) => {
+      const conversationId = `dm_${getConversationId(friend.id)}`;
+      const messagesRef = collection(db, "conversations", conversationId, "messages");
+      const q = query(messagesRef, orderBy("timestamp", "desc"), limit(50));
+
+      const unsubscribe = onSnapshot(q, (snapshot) => {
+        // Skip counting if this friend is currently selected
+        const isFriendSelected = selectedFriend?.id === friend.id && showDirectMessages;
+
+        if (!isFriendSelected) {
+          // Get last read timestamp for this conversation
+          const lastReadKey = `lastRead_${conversationId}`;
+          const lastReadTimestamp = localStorage.getItem(lastReadKey);
+          const lastRead = lastReadTimestamp ? parseInt(lastReadTimestamp) : 0;
+
+          // Count unread messages (messages newer than last read)
+          let unreadCount = 0;
+          snapshot.forEach((doc) => {
+            const data = doc.data();
+            const msgTimestamp = data.timestamp?.toMillis ? data.timestamp.toMillis() : data.timestamp;
+            // Count messages from the other friend (not from current user) that are newer than last read
+            if (data.senderId !== currentProfileId && msgTimestamp > lastRead) {
+              unreadCount++;
+            }
+          });
+
+          setUnreadDMCounts((prev) => {
+            const newMap = new Map(prev);
+            if (unreadCount > 0) {
+              newMap.set(friend.id, unreadCount);
+            } else {
+              newMap.delete(friend.id);
+            }
+            return newMap;
+          });
+        } else {
+          // Clear unread count for selected friend
+          setUnreadDMCounts((prev) => {
+            const newMap = new Map(prev);
+            newMap.delete(friend.id);
+            return newMap;
           });
         }
       });
 
-      // Update hasSoulMessages flag - only true if there are actual Soul messages
-      setHasSoulMessages(soulMessages.length > 0);
-
-      // Update messages state with Soul messages
-      setMessages((prevMessages) => {
-        // Remove old Soul messages and add new ones
-        const filtered = prevMessages.filter(m => m.conversationId !== soulConversationId);
-        return [...filtered, ...soulMessages];
-      });
-
-      console.log("Soul messages count:", soulMessages.length, "hasSoulMessages:", soulMessages.length > 0);
+      unsubscribeFunctions.push(unsubscribe);
     });
 
-    return () => unsubscribe();
-  }, [currentProfileId]);
+    return () => {
+      unsubscribeFunctions.forEach(fn => fn());
+    };
+  }, [currentProfileId, friends, selectedFriend, showDirectMessages]);
+
+  // Update last read timestamp when opening a DM conversation
+  useEffect(() => {
+    if (selectedFriend && selectedFriend.id !== 'soul_bot' && showDirectMessages) {
+      const conversationId = `dm_${getConversationId(selectedFriend.id)}`;
+      const lastReadKey = `lastRead_${conversationId}`;
+
+      // Update last read timestamp periodically while DM is open
+      const interval = setInterval(() => {
+        localStorage.setItem(lastReadKey, Date.now().toString());
+      }, 1000); // Update every second while conversation is open
+
+      // Set initial timestamp and clear unread count
+      localStorage.setItem(lastReadKey, Date.now().toString());
+      setUnreadDMCounts((prev) => {
+        const newMap = new Map(prev);
+        newMap.delete(selectedFriend.id);
+        return newMap;
+      });
+
+      return () => {
+        clearInterval(interval);
+        // Update last read timestamp when leaving the conversation
+        localStorage.setItem(lastReadKey, Date.now().toString());
+      };
+    }
+  }, [selectedFriend, showDirectMessages]);
 
   // Initialize WebSocket connection (for sending/receiving messages in real-time)
   useEffect(() => {
@@ -742,8 +880,13 @@ const MainPage = () => {
     let conversationId = "";
 
     if (showDirectMessages && selectedFriend) {
-      // Direct message: dm_{uid1}_{uid2}
-      conversationId = `dm_${getConversationId(selectedFriend.id)}`;
+      // Special case for Soul bot - use soul_{userId} format
+      if (selectedFriend.id === 'soul_bot') {
+        conversationId = `soul_${currentProfileId}`;
+      } else {
+        // Direct message: dm_{uid1}_{uid2}
+        conversationId = `dm_${getConversationId(selectedFriend.id)}`;
+      }
     } else if (!showDirectMessages && selectedChannel && selectedServer) {
       // Server channel message: server_{serverId}_channel_{channelId}
       conversationId = `server_${selectedServer}_channel_${selectedChannel}`;
@@ -3028,39 +3171,57 @@ const MainPage = () => {
                           : "hover:bg-accent/50"
                       }`}
                     >
-                      <Avatar className="h-8 w-8">
-                        <AvatarFallback className="bg-gradient-to-br from-purple-500 to-pink-500 text-white text-xs font-bold">
-                          S
-                        </AvatarFallback>
-                      </Avatar>
-                      <div className="flex items-center gap-2">
-                        <span className="text-sm font-medium">Soul</span>
-                        <div className="w-2 h-2 bg-green-500 rounded-full"></div>
+                      <div className="relative">
+                        <Avatar className="h-8 w-8">
+                          <AvatarFallback className="bg-gradient-to-br from-purple-500 to-pink-500 text-white text-xs font-bold">
+                            S
+                          </AvatarFallback>
+                        </Avatar>
+                        {unreadSoulCount > 0 && (
+                          <div className="absolute -top-1 -right-1 min-w-[18px] h-[18px] bg-red-500 rounded-full flex items-center justify-center animate-pulse">
+                            <span className="text-white text-xs font-bold leading-none">
+                              {unreadSoulCount > 9 ? '9+' : unreadSoulCount}
+                            </span>
+                          </div>
+                        )}
                       </div>
+                      <span className="text-sm font-medium">Soul</span>
                     </div>
                   )}
 
                   {/* Regular Friends */}
                   {friends.length > 0 ? (
-                    friends.map((friend) => (
-                      <div
-                        key={friend.id}
-                        onClick={() => setSelectedFriend(friend)}
-                        className={`flex items-center gap-3 p-2 rounded cursor-pointer transition-colors ${
-                          selectedFriend?.id === friend.id
-                            ? "bg-accent/50"
-                            : "hover:bg-accent/50"
-                        }`}
-                      >
-                        <Avatar className="h-8 w-8">
-                          <AvatarImage src={friend.avatar} />
-                          <AvatarFallback className="bg-primary text-primary-foreground text-xs">
-                            {getInitials(friend.name)}
-                          </AvatarFallback>
-                        </Avatar>
-                        <span className="text-sm">{friend.name}</span>
-                      </div>
-                    ))
+                    friends.map((friend) => {
+                      const unreadCount = unreadDMCounts.get(friend.id) || 0;
+                      return (
+                        <div
+                          key={friend.id}
+                          onClick={() => setSelectedFriend(friend)}
+                          className={`flex items-center gap-3 p-2 rounded cursor-pointer transition-colors ${
+                            selectedFriend?.id === friend.id
+                              ? "bg-accent/50"
+                              : "hover:bg-accent/50"
+                          }`}
+                        >
+                          <div className="relative">
+                            <Avatar className="h-8 w-8">
+                              <AvatarImage src={friend.avatar} />
+                              <AvatarFallback className="bg-primary text-primary-foreground text-xs">
+                                {getInitials(friend.name)}
+                              </AvatarFallback>
+                            </Avatar>
+                            {unreadCount > 0 && (
+                              <div className="absolute -top-1 -right-1 min-w-[18px] h-[18px] bg-red-500 rounded-full flex items-center justify-center">
+                                <span className="text-white text-xs font-bold leading-none">
+                                  {unreadCount > 9 ? '9+' : unreadCount}
+                                </span>
+                              </div>
+                            )}
+                          </div>
+                          <span className="text-sm">{friend.name}</span>
+                        </div>
+                      );
+                    })
                   ) : (
                     <p className="text-xs text-muted-foreground p-2">No friends yet</p>
                   )}
@@ -3201,7 +3362,7 @@ const MainPage = () => {
 
         {/* Main Content */}
         <div className="flex-1 flex flex-col overflow-hidden" onClick={() => setMessageContextMenu(null)}>
-          <div className="flex-1 overflow-y-auto p-4 space-y-4 pr-2 flex flex-col">
+          <div ref={messagesContainerRef} className="flex-1 overflow-y-auto p-4 space-y-4 pr-2 flex flex-col">
             {(() => {
               let conversationId = "";
               
@@ -3216,8 +3377,10 @@ const MainPage = () => {
               }
               
               console.log("Display - Looking for messages with conversationId:", conversationId);
+              console.log("Display - Total messages in state:", messages.length);
+              console.log("Display - All message conversationIds:", messages.map(m => `${m.conversationId} (${m.senderId})`));
               const conversationMessages = messages.filter(m => m.conversationId === conversationId);
-              console.log("Display - Found", conversationMessages.length, "messages");
+              console.log("Display - Found", conversationMessages.length, "messages for Soul");
               
               if (conversationMessages.length === 0) {
                 return (
