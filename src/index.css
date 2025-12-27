@@ -193,3 +193,28 @@ All colors MUST be HSL.
     scrollbar-color: rgba(255, 255, 255, 0.3) transparent;
   }
 }
+
+/* Tour tooltip customization */
+.joyride-tooltip {
+  background: hsl(var(--card)) !important;
+  border: 1px solid hsl(var(--border)) !important;
+  border-radius: var(--radius) !important;
+  color: hsl(var(--foreground)) !important;
+}
+
+.joyride-tooltip button[data-action="primary"] {
+  background: hsl(var(--primary)) !important;
+  color: hsl(var(--primary-foreground)) !important;
+}
+
+.joyride-tooltip button[data-action="primary"]:hover {
+  background: hsl(var(--primary) / 0.9) !important;
+}
+
+.joyride-beacon {
+  background: hsl(var(--primary)) !important;
+}
+
+.joyride-tooltip__body {
+  font-family: 'Poppins', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif !important;
+}

@@ -146,6 +146,7 @@ const SignupAuth = () => {
         title: "Success",
         description: "Account created successfully",
       });
+      sessionStorage.setItem('soulvoyage_new_user', 'true');
       setTimeout(() => navigate("/main"), 500);
     } catch (error: unknown) {
       setLoading(false);
@@ -221,6 +222,7 @@ const SignupAuth = () => {
         title: "Success",
         description: "Signed up with Google successfully",
       });
+      sessionStorage.setItem('soulvoyage_new_user', 'true');
       setTimeout(() => navigate("/main"), 500);
     } catch (error: unknown) {
       setLoading(false);

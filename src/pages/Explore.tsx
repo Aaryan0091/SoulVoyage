@@ -4,6 +4,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { ThemeToggle } from "@/components/ThemeToggle";
 import { ProfileMenu } from "@/components/ProfileMenu";
+import { OnboardingTour } from "@/components/OnboardingTour";
 import { ArrowLeft, Globe, Search, Lock, Globe2, Users } from "lucide-react";
 import Globe3D from "@/components/Globe3D";
 import { db, auth } from "@/lib/firebase";
@@ -31,6 +32,19 @@ const Explore = () => {
   const [servers, setServers] = useState<Server[]>([]);
   const [loading, setLoading] = useState(true);
   const [joiningServerId, setJoiningServerId] = useState<string | null>(null);
+
+  // Tour state
+  const [runTour, setRunTour] = useState(false);
+  const [showTour, setShowTour] = useState(false);
+
+  // Check if tour should be shown
+  useEffect(() => {
+    const savedTourState = sessionStorage.getItem('soulvoyage_tour_state');
+    if (savedTourState) {
+      setShowTour(true);
+      setTimeout(() => setRunTour(true), 300);
+    }
+  }, []);
 
   // Check if user came from main page and prevent refresh loop
   useEffect(() => {
@@ -357,6 +371,19 @@ const Explore = () => {
           </div>
         </div>
       </div>
+
+      {/* Onboarding Tour */}
+      {showTour && (
+        <OnboardingTour
+          run={runTour}
+          onTourComplete={() => {
+            setShowTour(false);
+            setRunTour(false);
+            // Navigation is handled by OnboardingTour
+          }}
+          isExplorePage={true}
+        />
+      )}
     </div>
   );
 };

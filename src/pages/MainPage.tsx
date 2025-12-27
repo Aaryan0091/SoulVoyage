@@ -4,10 +4,12 @@ import { useNavigate, useSearchParams } from "react-router-dom";
 import { ThemeToggle } from "@/components/ThemeToggle";
 import { ProfileMenu } from "@/components/ProfileMenu";
 import { ServerCreationDialog } from "@/components/ServerCreationDialog";
+import { OnboardingTour } from "@/components/OnboardingTour";
+import { WelcomeModal } from "@/components/WelcomeModal";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
-import { UserPlus, Users, Plus, Send, MessageSquare, ChevronDown, UserCheck, Settings, Layers, Copy, FileText, Image, Video, PieChart, Trash2, CheckSquare, X, Globe, Smile, Search, Reply, LogOut, MapPin, Calendar, DollarSign, Map as MapIcon } from "lucide-react";
+import { UserPlus, Users, Plus, Send, MessageSquare, ChevronDown, UserCheck, Settings, Layers, Copy, FileText, Image, Video, PieChart, Trash2, CheckSquare, X, Globe, Smile, Search, Reply, LogOut, MapPin, Calendar, DollarSign, Map as MapIcon, HelpCircle } from "lucide-react";
 import { useTheme } from "next-themes";
 import { Separator } from "@/components/ui/separator";
 import {
@@ -175,6 +177,11 @@ const MainPage = () => {
   const [pollOptions, setPollOptions] = useState(["", ""]);
   const [showEmojiSearchInterface, setShowEmojiSearchInterface] = useState(false);
   const emojiPickerRef = useRef<HTMLDivElement>(null);
+
+  // Tour state
+  const [runTour, setRunTour] = useState(false);
+  const [showWelcomeModal, setShowWelcomeModal] = useState(false);
+
   const [reactionPopover, setReactionPopover] = useState<{ messageId: string; buttonTop: number; buttonLeft: number } | null>(null);
   const reactionPopoverRef = useRef<HTMLDivElement>(null);
   const [reactionEmojiPickerMessageId, setReactionEmojiPickerMessageId] = useState<string | null>(null);
@@ -1279,6 +1286,33 @@ const MainPage = () => {
       window.history.replaceState({}, document.title, "/main");
     }
   }, [searchParams, toast]);
+
+  // Check if tour should be shown for new users
+  useEffect(() => {
+    const hasCompletedTour = localStorage.getItem('soulvoyage_tour_completed');
+    const isNewUser = sessionStorage.getItem('soulvoyage_new_user');
+
+    if (isNewUser && !hasCompletedTour) {
+      setShowWelcomeModal(true);
+      sessionStorage.removeItem('soulvoyage_new_user');
+    }
+  }, []);
+
+  const handleStartTour = () => {
+    setShowWelcomeModal(false);
+    // Small delay to ensure modal closes before tour starts
+    setTimeout(() => setRunTour(true), 300);
+  };
+
+  const handleSkipTour = () => {
+    setShowWelcomeModal(false);
+    localStorage.setItem('soulvoyage_tour_completed', 'true');
+  };
+
+  const handleTourComplete = () => {
+    setRunTour(false);
+    localStorage.setItem('soulvoyage_tour_completed', 'true');
+  };
 
   const handleServerClick = async (serverId: string) => {
     setSelectedServer(serverId);
@@ -3130,37 +3164,43 @@ const MainPage = () => {
   return (
     <div className="flex h-screen">
       {/* Server Sidebar */}
-      <div className="w-[72px] bg-card/50 backdrop-blur-sm border-r border-border flex flex-col items-center py-3 gap-2">
+      <div className="w-[72px] bg-card/50 border-r border-border flex flex-col items-center py-3 gap-2">
         {/* Direct Messages Icon */}
-        <Button
-          variant="ghost"
-          size="icon"
-          onClick={() => {
-            setShowDirectMessages(true);
-            setSelectedServer(null);
-            setSelectedChannel(null);
-          }}
-          className={`w-12 h-12 rounded-2xl transition-all ${
-            showDirectMessages
-              ? "bg-primary text-primary-foreground rounded-xl"
-              : "bg-card hover:bg-accent hover:rounded-xl"
-          }`}
-        >
-          <MessageSquare className="h-6 w-6" />
-        </Button>
+        <div className="relative flex items-center justify-center">
+          <Button
+            data-tour="dm-button"
+            variant="ghost"
+            size="icon"
+            onClick={() => {
+              setShowDirectMessages(true);
+              setSelectedServer(null);
+              setSelectedChannel(null);
+            }}
+            className={`w-12 h-12 rounded-2xl transition-all ${
+              showDirectMessages
+                ? "bg-primary text-primary-foreground rounded-xl"
+                : "bg-card hover:bg-accent hover:rounded-xl"
+            }`}
+          >
+            <MessageSquare className="h-6 w-6" />
+          </Button>
+        </div>
 
         {/* Globe Icon Button */}
-        <Button
-          variant="ghost"
-          size="icon"
-          onClick={() => {
-            sessionStorage.setItem('cameFromMain', 'true');
-            navigate("/explore");
-          }}
-          className="w-12 h-12 rounded-2xl bg-card hover:bg-accent hover:rounded-xl transition-all"
-        >
-          <Globe className="h-6 w-6 text-primary" />
-        </Button>
+        <div className="relative flex items-center justify-center">
+          <Button
+            data-tour="explore-button"
+            variant="ghost"
+            size="icon"
+            onClick={() => {
+              sessionStorage.setItem('cameFromMain', 'true');
+              navigate("/explore");
+            }}
+            className="w-12 h-12 rounded-2xl bg-card hover:bg-accent hover:rounded-xl transition-all"
+          >
+            <Globe className="h-6 w-6 text-primary" />
+          </Button>
+        </div>
 
         <Separator className="w-8" />
 
@@ -3203,14 +3243,17 @@ const MainPage = () => {
         )}
 
         {/* Add Server Button */}
-        <Button
-          variant="ghost"
-          size="icon"
-          onClick={() => setShowServerCreationDialog(true)}
-          className="w-12 h-12 rounded-2xl bg-card hover:bg-accent hover:rounded-xl transition-all"
-        >
-          <Plus className="h-6 w-6 text-primary" />
-        </Button>
+        <div className="relative flex items-center justify-center">
+          <Button
+            data-tour="add-server-button"
+            variant="ghost"
+            size="icon"
+            onClick={() => setShowServerCreationDialog(true)}
+            className="w-12 h-12 rounded-2xl bg-card hover:bg-accent hover:rounded-xl transition-all"
+          >
+            <Plus className="h-6 w-6 text-primary" />
+          </Button>
+        </div>
       </div>
 
       {/* Server Join Requests Section - Only visible to server owners */}
@@ -3284,7 +3327,7 @@ const MainPage = () => {
       {/* Direct Messages / Channels Sidebar */}
       <div className="w-60 bg-card/50 backdrop-blur-sm border-r border-border flex flex-col">
         {/* Sidebar Header */}
-        <div className="h-14 px-4 border-b border-border flex items-center justify-between gap-2">
+        <div data-tour="server-header" className="h-14 px-4 border-b border-border flex items-center justify-between gap-2">
           <h2 className="text-lg font-semibold">
             {showDirectMessages ? "Direct Messages" : currentServer?.name}
           </h2>
@@ -3349,6 +3392,7 @@ const MainPage = () => {
             {/* Friend Actions */}
             <div className="p-2 border-b border-border space-y-1">
               <Button
+                data-tour="add-friend-button"
                 variant="ghost"
                 className="w-full justify-start gap-3 text-foreground hover:bg-accent/50"
                 onClick={() => setShowAddFriendDialog(true)}
@@ -3372,7 +3416,7 @@ const MainPage = () => {
             </div>
 
             {/* Friends List */}
-            <div className="flex-1 overflow-y-auto p-2 space-y-1">
+            <div data-tour="channels-list" className="flex-1 overflow-y-auto p-2 space-y-1">
               {isFriendsLoading ? (
                 // Loading skeleton for friends
                 Array.from({ length: 5 }).map((_, i) => (
@@ -3456,7 +3500,7 @@ const MainPage = () => {
         ) : (
           <>
             {/* Categories Section */}
-            <div className="flex-1 overflow-y-auto p-2 space-y-1">
+            <div data-tour="channels-list" className="flex-1 overflow-y-auto p-2 space-y-1">
               {/* Regular Categories */}
               {currentServer?.categories?.filter(c => !c.isHidden).map((category) => (
                 <div key={category.id} className="space-y-1">
@@ -3579,8 +3623,25 @@ const MainPage = () => {
             )}
           </h3>
           <div className="flex items-center gap-2">
-            <ThemeToggle />
-            <ProfileMenu />
+            <div data-tour="theme-toggle">
+              <ThemeToggle />
+            </div>
+            <div data-tour="profile-menu">
+              <ProfileMenu />
+            </div>
+            <Button
+              data-tour="help-button"
+              variant="ghost"
+              size="icon"
+              onClick={() => {
+                setRunTour(false);
+                setTimeout(() => setRunTour(true), 100);
+              }}
+              className="rounded-full hover:bg-accent/50"
+              title="Help / Tour"
+            >
+              <HelpCircle className="h-5 w-5" />
+            </Button>
           </div>
         </div>
 
@@ -3832,13 +3893,13 @@ const MainPage = () => {
                           {msg.type !== "photo" && msg.type !== "poll" && (
                             <>
                               {/* Check if this is a trip announcement and format it as a card */}
-                              {msg.content.startsWith("TRIP_ANNOUNCEMENT|") ? (() => {
+                              {msg.content.startsWith("TRIP_ANNOUNCEMENT|") && (() => {
                                 const [, tripName, destination] = msg.content.split('|');
                                 return msg.tripId ? <TripAnnouncementCard tripId={msg.tripId} destination={destination} tripDetails={msg.tripDetails} /> : null;
-                              })() : (
-                                <>
-                                {/* Check if this is a trip planning channel message and format it */}
-                                {msg.content.includes("## 🌟") && msg.content.includes("**Destination:**") ? (
+                              })()}
+
+                              {/* Check if this is a trip planning channel message and format it */}
+                              {!msg.content.startsWith("TRIP_ANNOUNCEMENT|") && msg.content.includes("## 🌟") && msg.content.includes("**Destination:**") ? (
                                 <div className="bg-gradient-to-br from-teal-50 to-blue-50 dark:from-teal-950/20 dark:to-blue-950/20 rounded-lg p-4 border border-teal-200 dark:border-teal-800">
                                   <div className="space-y-3">
                                     <h3 className="text-lg font-bold text-teal-700 dark:text-teal-300 text-center">
@@ -3896,12 +3957,15 @@ const MainPage = () => {
                                     </div>
                                   </div>
                                 </div>
-                              ) : (
+                              ) : null}
+
+                              {/* Regular text content (not trip planning or trip announcement) */}
+                              {!msg.content.startsWith("TRIP_ANNOUNCEMENT|") && !(msg.content.includes("## 🌟") && msg.content.includes("**Destination:**")) && (
                                 <p className="break-words whitespace-pre-wrap">{msg.content}</p>
                               )}
 
                               {/* Show join button for trip announcements */}
-                              {msg.tripId && (
+                              {msg.tripId && !msg.content.startsWith("TRIP_ANNOUNCEMENT|") && (
                                 <div className="mt-3 pt-3 border-t border-current/20">
                                   <Button
                                     size="sm"
@@ -3913,7 +3977,7 @@ const MainPage = () => {
                                 </div>
                               )}
 
-                              {/* Reactions Bar */}
+                              {/* Reactions Bar - shows for all message types */}
                               {msg.reactions && Object.keys(msg.reactions).length > 0 && (
                                 <div className="flex flex-wrap gap-1 mt-2">
                                   {Object.entries(msg.reactions).map(([emoji, reactors]) => {
@@ -3935,8 +3999,6 @@ const MainPage = () => {
                                     );
                                   })}
                                 </div>
-                              )}
-                            </>
                               )}
                             </>
                           )}
@@ -4119,6 +4181,7 @@ const MainPage = () => {
               <DropdownMenu>
                 <DropdownMenuTrigger asChild>
                   <Button
+                    data-tour="message-plus-button"
                     variant="ghost"
                     size="icon"
                     className="rounded-full"
@@ -4172,7 +4235,7 @@ const MainPage = () => {
                 <Smile className="h-5 w-5" />
               </Button>
 
-              <div className="flex-1 relative">
+              <div className="flex-1 relative" data-tour="message-input">
                 <Input
                   id="message-input"
                   placeholder={showDirectMessages ? `Message ${selectedFriend?.name}...` : `Message in #${currentChannel?.name}`}
@@ -4927,6 +4990,19 @@ const MainPage = () => {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      {/* Onboarding Tour */}
+      <OnboardingTour
+        run={runTour}
+        onTourComplete={handleTourComplete}
+      />
+
+      {/* Welcome Modal for New Users */}
+      <WelcomeModal
+        isOpen={showWelcomeModal}
+        onStartTour={handleStartTour}
+        onSkip={handleSkipTour}
+      />
 
     </div>
   );
