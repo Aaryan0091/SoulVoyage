@@ -154,4 +154,42 @@ All colors MUST be HSL.
   body:not(.dark) [class*="card"] {
     box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05), 0 1px 2px rgba(0, 0, 0, 0.03);
   }
+
+  /* Scrollbar styles - hide by default, show on scroll */
+  .scrollbar-thin::-webkit-scrollbar {
+    width: 8px;
+  }
+
+  .scrollbar-thin::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  .scrollbar-thin::-webkit-scrollbar-thumb {
+    background: transparent;
+    border-radius: 4px;
+    transition: background 0.2s ease;
+  }
+
+  .scrollbar-thin.scrollbar-visible::-webkit-scrollbar-thumb {
+    background: rgba(156, 163, 175, 0.5);
+  }
+
+  .dark .scrollbar-thin.scrollbar-visible::-webkit-scrollbar-thumb {
+    background: rgba(255, 255, 255, 0.3);
+  }
+
+  /* Firefox scrollbar */
+  .scrollbar-thin {
+    scrollbar-width: thin;
+    scrollbar-color: transparent transparent;
+    transition: scrollbar-color 0.2s ease;
+  }
+
+  .scrollbar-thin.scrollbar-visible {
+    scrollbar-color: rgba(156, 163, 175, 0.5) transparent;
+  }
+
+  .dark .scrollbar-thin.scrollbar-visible {
+    scrollbar-color: rgba(255, 255, 255, 0.3) transparent;
+  }
 }

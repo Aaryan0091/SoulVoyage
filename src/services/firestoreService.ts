@@ -327,3 +327,59 @@ export const voteOnPoll = async (
     }
   }
 };
+
+// Add emoji reaction to message
+export const addReaction = async (
+  conversationId: string,
+  messageId: string,
+  emoji: string,
+  userId: string
+): Promise<void> => {
+  const messageRef = doc(db, `conversations/${conversationId}/messages`, messageId);
+  const messageDoc = await getDoc(messageRef);
+
+  if (messageDoc.exists()) {
+    const reactions = messageDoc.data()?.reactions || {};
+    const reactors = reactions[emoji] || [];
+
+    if (!reactors.includes(userId)) {
+      await updateDoc(messageRef, {
+        reactions: {
+          ...reactions,
+          [emoji]: [...reactors, userId]
+        }
+      });
+    }
+  }
+};
+
+// Remove emoji reaction from message
+export const removeReaction = async (
+  conversationId: string,
+  messageId: string,
+  emoji: string,
+  userId: string
+): Promise<void> => {
+  const messageRef = doc(db, `conversations/${conversationId}/messages`, messageId);
+  const messageDoc = await getDoc(messageRef);
+
+  if (messageDoc.exists()) {
+    const reactions = messageDoc.data()?.reactions || {};
+    const reactors = reactions[emoji] || [];
+
+    if (reactors.includes(userId)) {
+      const updatedReactors = reactors.filter((id: string) => id !== userId);
+      const updatedReactions = { ...reactions };
+
+      if (updatedReactors.length === 0) {
+        delete updatedReactions[emoji];
+      } else {
+        updatedReactions[emoji] = updatedReactors;
+      }
+
+      await updateDoc(messageRef, {
+        reactions: updatedReactions
+      });
+    }
+  }
+};

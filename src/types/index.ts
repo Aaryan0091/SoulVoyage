@@ -45,6 +45,9 @@ export interface Message {
     senderName: string;
     content: string;
   };
+  reactions?: {
+    [emoji: string]: string[]; // emoji -> array of user IDs who reacted
+  };
 }
 
 export interface Channel {

@@ -1,4 +1,5 @@
-import { useState, useEffect, useRef } from "react";
+import React, { useState, useEffect, useRef } from "react";
+import { createPortal } from "react-dom";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { ThemeToggle } from "@/components/ThemeToggle";
 import { ProfileMenu } from "@/components/ProfileMenu";
@@ -106,6 +107,9 @@ interface Message {
     budget: string;
     placesToVisit: string;
   };
+  reactions?: {
+    [emoji: string]: string[];
+  };
 }
 
 interface Server {
@@ -171,6 +175,10 @@ const MainPage = () => {
   const [pollOptions, setPollOptions] = useState(["", ""]);
   const [showEmojiSearchInterface, setShowEmojiSearchInterface] = useState(false);
   const emojiPickerRef = useRef<HTMLDivElement>(null);
+  const [reactionPopover, setReactionPopover] = useState<{ messageId: string; buttonTop: number; buttonLeft: number } | null>(null);
+  const reactionPopoverRef = useRef<HTMLDivElement>(null);
+  const [reactionEmojiPickerMessageId, setReactionEmojiPickerMessageId] = useState<string | null>(null);
+  const reactionEmojiPickerRef = useRef<HTMLDivElement>(null);
   const [selectedMessages, setSelectedMessages] = useState<Set<string>>(new Set());
   const [messageContextMenu, setMessageContextMenu] = useState<{ messageId: string; x: number; y: number } | null>(null);
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
@@ -262,6 +270,56 @@ const MainPage = () => {
       document.removeEventListener('keydown', handleEscapeKey);
     };
   }, [showEmojiSearchInterface]);
+
+  // Close reaction popover when clicking outside
+  useEffect(() => {
+    const handleClickOutside = (event: MouseEvent) => {
+      if (reactionPopoverRef.current && !reactionPopoverRef.current.contains(event.target as Node)) {
+        setReactionPopover(null);
+      }
+    };
+
+    const handleEscapeKey = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setReactionPopover(null);
+      }
+    };
+
+    if (reactionPopover) {
+      document.addEventListener('mousedown', handleClickOutside, true);
+      document.addEventListener('keydown', handleEscapeKey);
+    }
+
+    return () => {
+      document.removeEventListener('mousedown', handleClickOutside, true);
+      document.removeEventListener('keydown', handleEscapeKey);
+    };
+  }, [reactionPopover]);
+
+  // Close reaction emoji picker when clicking outside
+  useEffect(() => {
+    const handleClickOutside = (event: MouseEvent) => {
+      if (reactionEmojiPickerRef.current && !reactionEmojiPickerRef.current.contains(event.target as Node)) {
+        setReactionEmojiPickerMessageId(null);
+      }
+    };
+
+    const handleEscapeKey = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setReactionEmojiPickerMessageId(null);
+      }
+    };
+
+    if (reactionEmojiPickerMessageId) {
+      document.addEventListener('mousedown', handleClickOutside, true);
+      document.addEventListener('keydown', handleEscapeKey);
+    }
+
+    return () => {
+      document.removeEventListener('mousedown', handleClickOutside, true);
+      document.removeEventListener('keydown', handleEscapeKey);
+    };
+  }, [reactionEmojiPickerMessageId]);
 
   const ensureServerHasCategories = (server: Server): Server => {
     if (!server.categories || server.categories.length === 0) {
@@ -2519,6 +2577,84 @@ const MainPage = () => {
     }
   };
 
+  // Common quick reactions
+  const quickReactions = ["❤️", "👍", "😂", "😮", "😢", "🔥"];
+
+  // Handle adding a quick reaction
+  const handleAddReaction = async (messageId: string, emoji: string) => {
+    if (!currentProfileId) return;
+
+    const message = messages.find(m => m.id === messageId);
+    if (!message) return;
+
+    const reactions = message.reactions || {};
+    const reactors = reactions[emoji] || [];
+    const hasReacted = reactors.includes(currentProfileId);
+
+    let conversationId = "";
+
+    if (showDirectMessages && selectedFriend) {
+      if (selectedFriend.id === 'soul_bot') {
+        conversationId = `soul_${currentProfileId}`;
+      } else {
+        conversationId = `dm_${getConversationId(selectedFriend.id)}`;
+      }
+    } else if (!showDirectMessages && selectedChannel && selectedServer) {
+      conversationId = `server_${selectedServer}_channel_${selectedChannel}`;
+    }
+
+    if (!conversationId) return;
+
+    try {
+      const messageRef = doc(db, "conversations", conversationId, "messages", messageId);
+      const messageDoc = await getDoc(messageRef);
+
+      if (messageDoc.exists()) {
+        const existingReactions = messageDoc.data()?.reactions || {};
+        const existingReactors = existingReactions[emoji] || [];
+
+        let updatedReactions = { ...existingReactions };
+
+        if (hasReacted) {
+          // Remove reaction (toggle off)
+          const updatedReactors = existingReactors.filter((id: string) => id !== currentProfileId);
+          if (updatedReactors.length === 0) {
+            delete updatedReactions[emoji];
+          } else {
+            updatedReactions[emoji] = updatedReactors;
+          }
+        } else {
+          // Add reaction
+          updatedReactions = {
+            ...updatedReactions,
+            [emoji]: [...existingReactors, currentProfileId]
+          };
+        }
+
+        await updateDoc(messageRef, { reactions: updatedReactions });
+
+        // Update local state
+        const updatedMessage = { ...message, reactions: updatedReactions };
+        setMessages(messages.map(m => m.id === messageId ? updatedMessage : m));
+      }
+    } catch (error) {
+      console.error("Error toggling reaction:", error);
+    }
+
+    setReactionPopover(null);
+  };
+
+  // Open reaction popover
+  const handleOpenReactionPopover = (messageId: string, event: React.MouseEvent<HTMLButtonElement>) => {
+    const rect = event.currentTarget.getBoundingClientRect();
+    console.log('Button position:', { top: rect.top, left: rect.left, right: rect.right, bottom: rect.bottom });
+    setReactionPopover({
+      messageId,
+      buttonTop: rect.top,
+      buttonLeft: rect.left
+    });
+  };
+
   const handleDeleteForMe = async (messageId: string) => {
     try {
       const message = messages.find(m => m.id === messageId);
@@ -2902,6 +3038,94 @@ const MainPage = () => {
       .join("")
       .toUpperCase();
   };
+
+  // Trip Announcement Card Component (memoized to prevent re-render on typing)
+  const TripAnnouncementCard = React.memo(({ tripId, destination, tripDetails }: { tripId: string; destination: string; tripDetails?: { timeInterval: string; budget: string; placesToVisit: string } }) => {
+    const [trip, setTrip] = useState<any | null>(null);
+
+    useEffect(() => {
+      // If tripDetails are already in the message, use them
+      // Otherwise, fetch from the trips collection (for old messages)
+      if (tripDetails) {
+        setTrip({
+          timeInterval: tripDetails.timeInterval,
+          budget: tripDetails.budget,
+          placesToVisit: tripDetails.placesToVisit,
+        });
+        return;
+      }
+
+      // Fallback: fetch from trips collection for old messages
+      const fetchTripDetails = () => {
+        getDoc(doc(db, "trips", tripId))
+          .then((tripDoc) => {
+            if (tripDoc.exists()) {
+              setTrip(tripDoc.data());
+            }
+          })
+          .catch((error) => {
+            console.error("Error fetching trip details:", error);
+          });
+      };
+      fetchTripDetails();
+    }, [tripId, tripDetails]);
+
+    return (
+      <div className="bg-gradient-to-r from-teal-100 via-cyan-100 to-blue-100 dark:from-teal-900/50 dark:via-cyan-900/50 dark:to-blue-900/50 rounded-2xl p-6 border border-teal-300/50 dark:border-teal-700/50 shadow-lg">
+        <div className="space-y-5">
+          {/* Header */}
+          <div className="flex items-center gap-3">
+            <div className="h-14 w-14 rounded-full bg-gradient-to-br from-teal-400 to-cyan-500 flex items-center justify-center shadow-md">
+              <span className="text-2xl">✈️</span>
+            </div>
+            <div>
+              <h3 className="text-xl font-bold text-foreground">New trip created!</h3>
+              <p className="text-sm text-muted-foreground">Join the adventure</p>
+            </div>
+          </div>
+
+          {/* Destination */}
+          <div className="pl-16">
+            <p className="text-3xl font-bold bg-gradient-to-r from-teal-600 to-cyan-600 dark:from-teal-400 dark:to-cyan-400 bg-clip-text text-transparent">{destination}</p>
+          </div>
+
+          {/* Trip Details */}
+          {trip && (
+            <div className="pl-16 flex flex-col gap-3 text-sm">
+              <div className="flex items-center gap-2">
+                <Calendar className="h-4 w-4 text-teal-600 dark:text-teal-400" />
+                <span className="text-muted-foreground">Duration:</span>
+                <span className="font-medium">{trip.timeInterval}</span>
+              </div>
+              <div className="flex items-center gap-2">
+                <DollarSign className="h-4 w-4 text-teal-600 dark:text-teal-400" />
+                <span className="text-muted-foreground">Budget:</span>
+                <span className="font-medium">{trip.budget}</span>
+              </div>
+              {trip.placesToVisit && (
+                <div className="flex items-start gap-2">
+                  <MapIcon className="h-4 w-4 text-teal-600 dark:text-teal-400 mt-0.5" />
+                  <span className="text-muted-foreground">Places:</span>
+                  <span className="font-medium">{trip.placesToVisit}</span>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Join Trip Button */}
+          <div className="flex justify-center">
+            <Button
+              onClick={(e) => { e.stopPropagation(); handleJoinTrip(tripId); }}
+              className="bg-gradient-to-r from-teal-500 to-cyan-500 hover:from-teal-600 hover:to-cyan-600 text-white px-8 py-6 text-lg rounded-xl font-semibold shadow-md hover:shadow-lg transition-all duration-200 hover:scale-105"
+            >
+              <span className="mr-2">✈️</span>
+              Join Trip
+            </Button>
+          </div>
+        </div>
+      </div>
+    );
+  });
 
   return (
     <div className="flex h-screen">
@@ -3362,7 +3586,18 @@ const MainPage = () => {
 
         {/* Main Content */}
         <div className="flex-1 flex flex-col overflow-hidden" onClick={() => setMessageContextMenu(null)}>
-          <div ref={messagesContainerRef} className="flex-1 overflow-y-auto p-4 space-y-4 pr-2 flex flex-col">
+          <div
+            ref={messagesContainerRef}
+            className="flex-1 overflow-y-auto p-4 space-y-4 pr-2 flex flex-col scrollbar-thin"
+            onScroll={(e) => {
+              const target = e.currentTarget;
+              target.classList.add('scrollbar-visible');
+              clearTimeout((target as any).scrollTimeout);
+              (target as any).scrollTimeout = setTimeout(() => {
+                target.classList.remove('scrollbar-visible');
+              }, 1000);
+            }}
+          >
             {(() => {
               let conversationId = "";
               
@@ -3445,7 +3680,7 @@ const MainPage = () => {
                 return (
                   <div
                     key={msg.id}
-                    className={`flex gap-2 ${isCurrentUser ? "justify-end" : "justify-start"} max-w-full ${
+                    className={`flex gap-2 group ${isCurrentUser ? "justify-end" : "justify-start"} max-w-full ${
                       isSelected ? "bg-accent/10 rounded-lg px-2 py-1 -mx-2" : ""
                     }`}
                   >
@@ -3599,100 +3834,11 @@ const MainPage = () => {
                               {/* Check if this is a trip announcement and format it as a card */}
                               {msg.content.startsWith("TRIP_ANNOUNCEMENT|") ? (() => {
                                 const [, tripName, destination] = msg.content.split('|');
-
-                                // Component to display trip announcement with details
-                                const TripAnnouncement = ({ tripId, tripDetails }: { tripId: string; tripDetails?: { timeInterval: string; budget: string; placesToVisit: string } }) => {
-                                  const [trip, setTrip] = useState<any | null>(null);
-
-                                  useEffect(() => {
-                                    // If tripDetails are already in the message, use them
-                                    // Otherwise, fetch from the trips collection (for old messages)
-                                    if (tripDetails) {
-                                      setTrip({
-                                        timeInterval: tripDetails.timeInterval,
-                                        budget: tripDetails.budget,
-                                        placesToVisit: tripDetails.placesToVisit,
-                                      });
-                                      return;
-                                    }
-
-                                    // Fallback: fetch from trips collection for old messages
-                                    const fetchTripDetails = () => {
-                                      getDoc(doc(db, "trips", tripId))
-                                        .then((tripDoc) => {
-                                          if (tripDoc.exists()) {
-                                            setTrip(tripDoc.data());
-                                          }
-                                        })
-                                        .catch((error) => {
-                                          console.error("Error fetching trip details:", error);
-                                        });
-                                    };
-                                    fetchTripDetails();
-                                  }, [tripId, tripDetails]);
-
-                                  return (
-                                    <div className="bg-gradient-to-r from-teal-100 via-cyan-100 to-blue-100 dark:from-teal-900/50 dark:via-cyan-900/50 dark:to-blue-900/50 rounded-2xl p-6 border border-teal-300/50 dark:border-teal-700/50 shadow-lg">
-                                      <div className="space-y-5">
-                                        {/* Header */}
-                                        <div className="flex items-center gap-3">
-                                          <div className="h-14 w-14 rounded-full bg-gradient-to-br from-teal-400 to-cyan-500 flex items-center justify-center shadow-md">
-                                            <span className="text-2xl">✈️</span>
-                                          </div>
-                                          <div>
-                                            <h3 className="text-xl font-bold text-foreground">New trip created!</h3>
-                                            <p className="text-sm text-muted-foreground">Join the adventure</p>
-                                          </div>
-                                        </div>
-
-                                        {/* Destination */}
-                                        <div className="pl-16">
-                                          <p className="text-3xl font-bold bg-gradient-to-r from-teal-600 to-cyan-600 dark:from-teal-400 dark:to-cyan-400 bg-clip-text text-transparent">{destination}</p>
-                                        </div>
-
-                                        {/* Trip Details */}
-                                        {trip && (
-                                          <div className="pl-16 flex flex-col gap-3 text-sm">
-                                            <div className="flex items-center gap-2">
-                                              <Calendar className="h-4 w-4 text-teal-600 dark:text-teal-400" />
-                                              <span className="text-muted-foreground">Duration:</span>
-                                              <span className="font-medium">{trip.timeInterval}</span>
-                                            </div>
-                                            <div className="flex items-center gap-2">
-                                              <DollarSign className="h-4 w-4 text-teal-600 dark:text-teal-400" />
-                                              <span className="text-muted-foreground">Budget:</span>
-                                              <span className="font-medium">{trip.budget}</span>
-                                            </div>
-                                            {trip.placesToVisit && (
-                                              <div className="flex items-start gap-2">
-                                                <MapIcon className="h-4 w-4 text-teal-600 dark:text-teal-400 mt-0.5" />
-                                                <span className="text-muted-foreground">Places:</span>
-                                                <span className="font-medium">{trip.placesToVisit}</span>
-                                              </div>
-                                            )}
-                                          </div>
-                                        )}
-
-                                        {/* Join Trip Button */}
-                                        <div className="flex justify-center">
-                                          <Button
-                                            onClick={(e) => { e.stopPropagation(); handleJoinTrip(tripId); }}
-                                            className="bg-gradient-to-r from-teal-500 to-cyan-500 hover:from-teal-600 hover:to-cyan-600 text-white px-8 py-6 text-lg rounded-xl font-semibold shadow-md hover:shadow-lg transition-all duration-200 hover:scale-105"
-                                          >
-                                            <span className="mr-2">✈️</span>
-                                            Join Trip
-                                          </Button>
-                                        </div>
-                                      </div>
-                                    </div>
-                                  );
-                                };
-
-                                return msg.tripId ? <TripAnnouncement tripId={msg.tripId} tripDetails={msg.tripDetails} /> : null;
+                                return msg.tripId ? <TripAnnouncementCard tripId={msg.tripId} destination={destination} tripDetails={msg.tripDetails} /> : null;
                               })() : (
-                              <>
-                              {/* Check if this is a trip planning channel message and format it */}
-                              {msg.content.includes("## 🌟") && msg.content.includes("**Destination:**") ? (
+                                <>
+                                {/* Check if this is a trip planning channel message and format it */}
+                                {msg.content.includes("## 🌟") && msg.content.includes("**Destination:**") ? (
                                 <div className="bg-gradient-to-br from-teal-50 to-blue-50 dark:from-teal-950/20 dark:to-blue-950/20 rounded-lg p-4 border border-teal-200 dark:border-teal-800">
                                   <div className="space-y-3">
                                     <h3 className="text-lg font-bold text-teal-700 dark:text-teal-300 text-center">
@@ -3766,6 +3912,30 @@ const MainPage = () => {
                                   </Button>
                                 </div>
                               )}
+
+                              {/* Reactions Bar */}
+                              {msg.reactions && Object.keys(msg.reactions).length > 0 && (
+                                <div className="flex flex-wrap gap-1 mt-2">
+                                  {Object.entries(msg.reactions).map(([emoji, reactors]) => {
+                                    const hasReacted = reactors.includes(currentProfileId || "");
+                                    return (
+                                      <button
+                                        key={emoji}
+                                        onClick={() => handleAddReaction(msg.id, emoji)}
+                                        className={`flex items-center gap-1 px-2 py-1 rounded-full text-sm border transition-all ${
+                                          hasReacted
+                                            ? "bg-accent border-accent"
+                                            : "bg-muted/50 border-border hover:bg-accent/50"
+                                        }`}
+                                        title={reactors.join(", ")}
+                                      >
+                                        <span>{emoji}</span>
+                                        <span className="text-xs text-black dark:text-white">{reactors.length}</span>
+                                      </button>
+                                    );
+                                  })}
+                                </div>
+                              )}
                             </>
                               )}
                             </>
@@ -3773,6 +3943,17 @@ const MainPage = () => {
                         </>
                       )}
                     </div>
+
+                    {/* Reaction Button - appears on hover on the inner side of message */}
+                    <button
+                      onClick={(e) => handleOpenReactionPopover(msg.id, e)}
+                      className={`opacity-0 group-hover:opacity-100 transition-opacity self-center p-1.5 hover:bg-accent/50 rounded-full ${
+                        isCurrentUser ? "order-[-1] mr-2" : "order-1 ml-2"
+                      }`}
+                      title="React to message"
+                    >
+                      <Smile className="h-4 w-4 text-muted-foreground" />
+                    </button>
                   </div>
                 );
               });
@@ -3827,7 +4008,101 @@ const MainPage = () => {
                     height="380px"
                     skinTonesDisabled={true}
                     emojiVersion="1.0"
-                    theme={theme === 'dark' ? 'dark' : 'light' as any}
+                    theme={theme === 'dark' ? ('dark' as any) : ('light' as any)}
+                  />
+                </div>
+              </div>
+            )}
+
+            {/* Reaction Popover */}
+            {reactionPopover && createPortal(
+              (() => {
+                const message = messages.find(m => m.id === reactionPopover.messageId);
+                const isCurrentUserMsg = message?.senderId === currentProfileId;
+                const popoverWidth = 250; // approximate width of popover
+                const leftPos = isCurrentUserMsg
+                  ? Math.max(10, reactionPopover.buttonLeft - popoverWidth + 30)
+                  : Math.max(10, reactionPopover.buttonLeft);
+                const bottomPos = window.innerHeight - reactionPopover.buttonTop + 5;
+                return (
+                  <div
+                    ref={reactionPopoverRef}
+                    className="fixed z-[9999] animate-in fade-in zoom-in-95 duration-150"
+                    style={{
+                      left: `${leftPos}px`,
+                      top: 'auto',
+                      bottom: `${bottomPos}px`,
+                      transform: 'translateZ(0)',
+                    }}
+                    onClick={(e) => e.stopPropagation()}
+                  >
+                  <div
+                    className="rounded-lg shadow-2xl border overflow-hidden flex"
+                    style={{
+                      backgroundColor: theme === 'dark' ? '#36393f' : '#ffffff',
+                      borderColor: theme === 'dark' ? '#202225' : '#e1e5e9'
+                    }}
+                  >
+                    {quickReactions.map((emoji) => {
+                      const message = messages.find(m => m.id === reactionPopover.messageId);
+                      const hasReacted = message?.reactions?.[emoji]?.includes(currentProfileId || "");
+                      return (
+                        <button
+                          key={emoji}
+                          onClick={() => handleAddReaction(reactionPopover.messageId, emoji)}
+                          className={`px-3 py-2 text-xl hover:bg-accent/50 transition-colors ${
+                            hasReacted ? "bg-accent/30" : ""
+                          }`}
+                          title="Click to react"
+                        >
+                          {emoji}
+                        </button>
+                      );
+                    })}
+                    <button
+                      onClick={() => {
+                        setReactionEmojiPickerMessageId(reactionPopover.messageId);
+                        setReactionPopover(null);
+                      }}
+                      className="px-3 py-2 text-xl hover:bg-accent/50 transition-colors text-muted-foreground font-bold"
+                      title="More emojis"
+                    >
+                      +
+                    </button>
+                  </div>
+                </div>
+              );
+            })(),
+              document.body
+            )}
+
+            {/* Reaction Emoji Picker Panel */}
+            {reactionEmojiPickerMessageId && (
+              <div
+                ref={reactionEmojiPickerRef}
+                className="absolute bottom-full mb-2 z-50"
+                onClick={(e) => e.stopPropagation()}
+              >
+                <div
+                  className="rounded-lg shadow-2xl border overflow-hidden"
+                  style={{
+                    backgroundColor: theme === 'dark' ? '#36393f' : '#ffffff',
+                    borderColor: theme === 'dark' ? '#202225' : '#e1e5e9'
+                  }}
+                >
+                  <Picker
+                    onEmojiClick={(emojiObject) => {
+                      if (emojiObject && emojiObject.emoji && reactionEmojiPickerMessageId) {
+                        handleAddReaction(reactionEmojiPickerMessageId, emojiObject.emoji);
+                        setReactionEmojiPickerMessageId(null);
+                      }
+                    }}
+                    searchPlaceholder="Search emojis..."
+                    width="320px"
+                    height="380px"
+                    skinTonesDisabled={true}
+                    emojiVersion="1.0"
+                    theme={theme === 'dark' ? ('dark' as any) : ('light' as any)}
                   />
                 </div>
               </div>
