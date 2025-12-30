@@ -5,6 +5,8 @@ import {
   createUserWithEmailAndPassword,
   signInWithPopup,
   GoogleAuthProvider,
+  fetchSignInMethodsForEmail,
+  signOut,
 } from "firebase/auth";
 import { FirebaseError } from "firebase/app";
 import { auth, db } from "@/lib/firebase";
@@ -117,16 +119,25 @@ const SignupAuth = () => {
     setLoading(true);
     try {
       const trimmedEmail = email.trim().toLowerCase();
+
+      // Sign out any existing user first (clears cached auth)
+      if (auth.currentUser) {
+        await signOut(auth);
+        // Small delay to ensure sign-out completes
+        await new Promise(resolve => setTimeout(resolve, 500));
+      }
+
+      // Try to create the account directly
       const authResult = await createUserWithEmailAndPassword(auth, trimmedEmail, password);
-      
-      const fullName = middleName 
-        ? `${firstName} ${middleName} ${lastName}` 
+
+      const fullName = middleName
+        ? `${firstName} ${middleName} ${lastName}`
         : `${firstName} ${lastName}`;
-      
+
       // Use Firebase Auth UID as the document ID
       const userId = authResult.user.uid;
       const customUserId = generateUserId(); // Keep for display purposes
-      
+
       const newProfile = {
         id: userId,
         name: fullName,
@@ -151,10 +162,28 @@ const SignupAuth = () => {
     } catch (error: unknown) {
       setLoading(false);
       let errorMessage = "Failed to create account";
-      
+
       if (error instanceof FirebaseError) {
         if (error.code === "auth/email-already-in-use") {
-          errorMessage = "Email already registered";
+          // Check if it's a Google account
+          fetchSignInMethodsForEmail(auth, email.trim().toLowerCase())
+            .then(methods => {
+              console.log("Account exists with methods:", methods);
+              if (methods.includes('google.com')) {
+                toast({
+                  title: "Google Account Found",
+                  description: "You already have an account with Google. Please sign in with Google, then go to Edit Profile to set a password.",
+                  variant: "destructive",
+                });
+              } else {
+                toast({
+                  title: "Account Recently Deleted",
+                  description: "This email was recently deleted. Please wait a few minutes and try again, or use a different email.",
+                  variant: "destructive",
+                });
+              }
+            });
+          return;
         } else if (error.code === "auth/weak-password") {
           errorMessage = "Password is too weak";
         } else if (error.code === "auth/invalid-email") {
@@ -165,13 +194,22 @@ const SignupAuth = () => {
       } else if (error instanceof Error && error.message) {
         errorMessage = error.message;
       }
-      
-      toast({
-        title: "Error",
-        description: errorMessage,
-        variant: "destructive",
-      });
-      
+
+      // Only show this toast if not handled above (not email-already-in-use)
+      if (error instanceof FirebaseError && error.code !== "auth/email-already-in-use") {
+        toast({
+          title: "Error",
+          description: errorMessage,
+          variant: "destructive",
+        });
+      } else if (!(error instanceof FirebaseError)) {
+        toast({
+          title: "Error",
+          description: errorMessage,
+          variant: "destructive",
+        });
+      }
+
       console.error("Signup error:", error);
     }
   };

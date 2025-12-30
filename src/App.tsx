@@ -10,6 +10,7 @@ import ProtectedRoute from "@/components/ProtectedRoute";
 import Index from "./pages/Index";
 import LoginAuth from "./pages/LoginAuth";
 import SignupAuth from "./pages/SignupAuth";
+import ForgotPassword from "./pages/ForgotPassword";
 import MainPage from "./pages/MainPage";
 import ServerSettings from "./pages/ServerSettings";
 import EditProfile from "./pages/EditProfile";
@@ -27,6 +28,7 @@ const router = createBrowserRouter(
     { path: "/", element: <Index /> },
     { path: "/login-auth", element: <LoginAuth /> },
     { path: "/signup-auth", element: <SignupAuth /> },
+    { path: "/forgot-password", element: <ForgotPassword /> },
     { path: "/main", element: <ProtectedRoute element={<MainPage />} /> },
     { path: "/server/:serverId/settings", element: <ProtectedRoute element={<ServerSettings />} /> },
     { path: "/edit-profile", element: <ProtectedRoute element={<EditProfile />} /> },

@@ -1,6 +1,6 @@
 import { useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
-import { ArrowLeft, Copy, Check } from "lucide-react";
+import { ArrowLeft, Copy, Check, Lock, Key } from "lucide-react";
 import { ThemeToggle } from "@/components/ThemeToggle";
 import { ProfileMenu } from "@/components/ProfileMenu";
 import { Button } from "@/components/ui/button";
@@ -8,9 +8,12 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { useToast } from "@/hooks/use-toast";
 import { useAuth } from "@/context/AuthContext";
+import { auth } from "@/lib/firebase";
+import { fetchSignInMethodsForEmail, linkWithCredential, EmailAuthProvider, updatePassword, reauthenticateWithCredential } from "firebase/auth";
 
 const EditProfile = () => {
   const navigate = useNavigate();
@@ -18,7 +21,16 @@ const EditProfile = () => {
   const { currentProfile } = useAuth();
   const [userId, setUserId] = useState("");
   const [copied, setCopied] = useState(false);
-  
+  const [hasPassword, setHasPassword] = useState(false);
+  const [checkingProvider, setCheckingProvider] = useState(true);
+
+  // Password dialog states
+  const [showPasswordDialog, setShowPasswordDialog] = useState(false);
+  const [currentPassword, setCurrentPassword] = useState("");
+  const [newPassword, setNewPassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
+  const [passwordLoading, setPasswordLoading] = useState(false);
+
   const [formData, setFormData] = useState({
     name: "",
     email: "",
@@ -37,6 +49,24 @@ const EditProfile = () => {
         location: "",
         phone: "",
       });
+
+      // Check if user has password sign-in method
+      const checkSignInMethod = async () => {
+        if (currentProfile.email && auth.currentUser) {
+          try {
+            const methods = await fetchSignInMethodsForEmail(auth, currentProfile.email);
+            setHasPassword(methods.includes("password"));
+          } catch (error) {
+            console.error("Error checking sign-in methods:", error);
+          } finally {
+            setCheckingProvider(false);
+          }
+        } else {
+          setCheckingProvider(false);
+        }
+      };
+
+      checkSignInMethod();
     }
   }, [currentProfile]);
 
@@ -84,6 +114,99 @@ const EditProfile = () => {
     });
   };
 
+  const openPasswordDialog = () => {
+    setCurrentPassword("");
+    setNewPassword("");
+    setConfirmPassword("");
+    setShowPasswordDialog(true);
+  };
+
+  const handlePasswordSubmit = async () => {
+    // Validation
+    if (newPassword.length < 6) {
+      toast({
+        title: "Password Too Short",
+        description: "Password must be at least 6 characters long.",
+        variant: "destructive",
+      });
+      return;
+    }
+
+    if (newPassword !== confirmPassword) {
+      toast({
+        title: "Passwords Don't Match",
+        description: "New password and confirm password must be the same.",
+        variant: "destructive",
+      });
+      return;
+    }
+
+    setPasswordLoading(true);
+
+    try {
+      const user = auth.currentUser;
+      if (!user || !user.email) {
+        throw new Error("No authenticated user found");
+      }
+
+      if (hasPassword) {
+        // User already has password - need to reauthenticate first, then update
+        if (!currentPassword) {
+          toast({
+            title: "Current Password Required",
+            description: "Please enter your current password to verify.",
+            variant: "destructive",
+          });
+          setPasswordLoading(false);
+          return;
+        }
+
+        const credential = EmailAuthProvider.credential(user.email, currentPassword);
+        await reauthenticateWithCredential(user, credential);
+        await updatePassword(user, newPassword);
+
+        toast({
+          title: "Password Changed",
+          description: "Your password has been successfully updated.",
+        });
+      } else {
+        // User doesn't have password yet (Google user) - link email/password credential
+        const credential = EmailAuthProvider.credential(user.email, newPassword);
+        await linkWithCredential(user, credential);
+
+        setHasPassword(true);
+        toast({
+          title: "Password Set",
+          description: "You can now sign in with your email and password, or continue using Google.",
+        });
+      }
+
+      setShowPasswordDialog(false);
+      setCurrentPassword("");
+      setNewPassword("");
+      setConfirmPassword("");
+    } catch (error: any) {
+      let errorMessage = "Failed to update password";
+      if (error.code === "auth/wrong-password") {
+        errorMessage = "Current password is incorrect.";
+      } else if (error.code === "auth/weak-password") {
+        errorMessage = "Password is too weak. Please use a stronger password.";
+      } else if (error.code === "auth/email-already-in-use") {
+        errorMessage = "This email is already linked to another account.";
+      } else if (error.message) {
+        errorMessage = error.message;
+      }
+
+      toast({
+        title: "Error",
+        description: errorMessage,
+        variant: "destructive",
+      });
+    } finally {
+      setPasswordLoading(false);
+    }
+  };
+
   return (
     <div className="min-h-screen bg-background">
       {/* Profile and Theme Toggle in top right corner */}
@@ -103,7 +226,8 @@ const EditProfile = () => {
           Back to Main
         </Button>
 
-        <div className="max-w-2xl mx-auto">
+        <div className="max-w-2xl mx-auto space-y-6">
+          {/* Main Profile Card */}
           <Card>
             <CardHeader>
               <CardTitle className="text-2xl">Edit Profile</CardTitle>
@@ -229,8 +353,134 @@ const EditProfile = () => {
               </form>
             </CardContent>
           </Card>
+
+          {/* Password & Security Card */}
+          <Card>
+            <CardHeader>
+              <CardTitle className="flex items-center gap-2">
+                <Lock className="h-5 w-5" />
+                Password & Security
+              </CardTitle>
+              <CardDescription>
+                Manage your password and sign-in options
+              </CardDescription>
+            </CardHeader>
+            <CardContent>
+              {checkingProvider ? (
+                <p className="text-sm text-muted-foreground">Checking sign-in methods...</p>
+              ) : (
+                <div className="space-y-4">
+                  <div className="flex items-center justify-between p-4 bg-muted/50 rounded-lg">
+                    <div className="flex items-center gap-3">
+                      <Key className="h-5 w-5 text-muted-foreground" />
+                      <div>
+                        <p className="font-medium">
+                          {hasPassword ? "Email & Password Sign-in" : "Set Password Sign-in"}
+                        </p>
+                        <p className="text-sm text-muted-foreground">
+                          {hasPassword
+                            ? "You can sign in using your email and password"
+                            : "Add a password to sign in without Google"}
+                        </p>
+                      </div>
+                    </div>
+                    <Button
+                      onClick={openPasswordDialog}
+                      variant={hasPassword ? "outline" : "default"}
+                    >
+                      {hasPassword ? "Change Password" : "Set Password"}
+                    </Button>
+                  </div>
+
+                  {!hasPassword && (
+                    <p className="text-xs text-muted-foreground">
+                      Note: You can continue using Google sign-in even after setting a password. Both methods will work.
+                    </p>
+                  )}
+                </div>
+              )}
+            </CardContent>
+          </Card>
         </div>
       </div>
+
+      {/* Password Dialog */}
+      <Dialog open={showPasswordDialog} onOpenChange={setShowPasswordDialog}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <Lock className="h-5 w-5" />
+              {hasPassword ? "Change Your Password" : "Set a Password"}
+            </DialogTitle>
+            <DialogDescription>
+              {hasPassword
+                ? "Enter your current password and choose a new one"
+                : "Create a password to sign in without using Google"}
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="space-y-4 py-4">
+            {hasPassword && (
+              <div className="space-y-2">
+                <Label htmlFor="current-password">Current Password</Label>
+                <Input
+                  id="current-password"
+                  type="password"
+                  placeholder="Enter your current password"
+                  value={currentPassword}
+                  onChange={(e) => setCurrentPassword(e.target.value)}
+                />
+              </div>
+            )}
+
+            <div className="space-y-2">
+              <Label htmlFor="new-password">{hasPassword ? "New Password" : "Password"}</Label>
+              <Input
+                id="new-password"
+                type="password"
+                placeholder="At least 6 characters"
+                value={newPassword}
+                onChange={(e) => setNewPassword(e.target.value)}
+              />
+            </div>
+
+            <div className="space-y-2">
+              <Label htmlFor="confirm-password">Confirm Password</Label>
+              <Input
+                id="confirm-password"
+                type="password"
+                placeholder="Re-enter your password"
+                value={confirmPassword}
+                onChange={(e) => setConfirmPassword(e.target.value)}
+              />
+            </div>
+
+            {newPassword && newPassword.length < 6 && (
+              <p className="text-xs text-destructive">Password must be at least 6 characters long</p>
+            )}
+
+            {confirmPassword && newPassword !== confirmPassword && (
+              <p className="text-xs text-destructive">Passwords do not match</p>
+            )}
+          </div>
+
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => setShowPasswordDialog(false)}
+              disabled={passwordLoading}
+            >
+              Cancel
+            </Button>
+            <Button
+              onClick={handlePasswordSubmit}
+              disabled={passwordLoading || !newPassword || !confirmPassword || newPassword.length < 6 || newPassword !== confirmPassword || (hasPassword && !currentPassword)}
+            >
+              {passwordLoading ? "Processing..." : hasPassword ? "Change Password" : "Set Password"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 };

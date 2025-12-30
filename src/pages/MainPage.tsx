@@ -387,12 +387,22 @@ const MainPage = () => {
       const hasMessages = snapshot.docs.length > 0;
       setHasSoulMessages(hasMessages);
 
+      // Initialize lastReadTimestamp if this is the first time and there are existing messages
+      const lastReadKey = `lastRead_soul_${currentProfileId}`;
+      if (!localStorage.getItem(lastReadKey) && snapshot.docs.length > 0) {
+        // Set lastRead to the newest message timestamp so existing messages aren't counted as unread
+        const newestDoc = snapshot.docs[snapshot.docs.length - 1];
+        const newestData = newestDoc.data();
+        const newestTimestamp = newestData.timestamp?.toMillis ? newestData.timestamp.toMillis() : newestData.timestamp;
+        localStorage.setItem(lastReadKey, newestTimestamp.toString());
+        console.log("Initialized lastReadTimestamp to newest message:", newestTimestamp);
+      }
+
       // Only calculate unread if Soul is NOT the currently selected conversation
       const isSoulSelected = selectedFriend?.id === 'soul_bot';
 
       if (!isSoulSelected) {
         // Calculate unread Soul messages
-        const lastReadKey = `lastRead_soul_${currentProfileId}`;
         const lastReadTimestamp = localStorage.getItem(lastReadKey);
         const lastRead = lastReadTimestamp ? parseInt(lastReadTimestamp) : 0;
 
@@ -453,12 +463,22 @@ const MainPage = () => {
       const q = query(messagesRef, orderBy("timestamp", "desc"), limit(50));
 
       const unsubscribe = onSnapshot(q, (snapshot) => {
+        // Initialize lastReadTimestamp if this is the first time and there are existing messages
+        const lastReadKey = `lastRead_${conversationId}`;
+        if (!localStorage.getItem(lastReadKey) && snapshot.docs.length > 0) {
+          // Set lastRead to the newest message timestamp so existing messages aren't counted as unread
+          const newestDoc = snapshot.docs[0]; // desc order, so first is newest
+          const newestData = newestDoc.data();
+          const newestTimestamp = newestData.timestamp?.toMillis ? newestData.timestamp.toMillis() : newestData.timestamp;
+          localStorage.setItem(lastReadKey, newestTimestamp.toString());
+          console.log(`Initialized lastReadTimestamp for ${friend.name} to newest message:`, newestTimestamp);
+        }
+
         // Skip counting if this friend is currently selected
         const isFriendSelected = selectedFriend?.id === friend.id && showDirectMessages;
 
         if (!isFriendSelected) {
           // Get last read timestamp for this conversation
-          const lastReadKey = `lastRead_${conversationId}`;
           const lastReadTimestamp = localStorage.getItem(lastReadKey);
           const lastRead = lastReadTimestamp ? parseInt(lastReadTimestamp) : 0;
 
@@ -3446,7 +3466,7 @@ const MainPage = () => {
                           </AvatarFallback>
                         </Avatar>
                         {unreadSoulCount > 0 && (
-                          <div className="absolute -top-1 -right-1 min-w-[18px] h-[18px] bg-red-500 rounded-full flex items-center justify-center animate-pulse">
+                          <div className="absolute -top-1 -right-1 min-w-[18px] h-[18px] bg-red-500 rounded-full flex items-center justify-center">
                             <span className="text-white text-xs font-bold leading-none">
                               {unreadSoulCount > 9 ? '9+' : unreadSoulCount}
                             </span>

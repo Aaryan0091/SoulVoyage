@@ -6,6 +6,7 @@ import {
   signInWithPopup,
   GoogleAuthProvider,
   signOut,
+  fetchSignInMethodsForEmail,
 } from "firebase/auth";
 import { FirebaseError } from "firebase/app";
 import { auth, db } from "@/lib/firebase";
@@ -76,27 +77,49 @@ const LoginAuth = () => {
     } catch (error: unknown) {
       setLoading(false);
       let errorMessage = "Failed to sign in";
-      
+
       if (error instanceof FirebaseError) {
-        if (error.code === "auth/user-not-found") {
-          errorMessage = "No account found with this email";
-        } else if (error.code === "auth/wrong-password") {
-          errorMessage = "Incorrect password";
-        } else if (error.code === "auth/invalid-credential") {
-          errorMessage = "Email or password is incorrect";
+        // Check if this is a Google account without password
+        if (
+          error.code === "auth/user-not-found" ||
+          error.code === "auth/wrong-password" ||
+          error.code === "auth/invalid-credential"
+        ) {
+          // Check sign-in methods for this email
+          try {
+            const signInMethods = await fetchSignInMethodsForEmail(auth, trimmedEmail);
+            console.log("Login check - Sign-in methods:", signInMethods);
+
+            if (signInMethods.includes('google.com') && !signInMethods.includes('password')) {
+              toast({
+                title: "Google Account Found",
+                description: "You signed up with Google and haven't set a password yet. Please sign in with Google, then go to Edit Profile to set a password.",
+                variant: "destructive",
+              });
+              return;
+            } else if (signInMethods.includes('password')) {
+              errorMessage = "Incorrect password. Try again or use Forgot Password.";
+            } else {
+              errorMessage = "No account found with this email.";
+            }
+          } catch (checkError) {
+            errorMessage = "Email or password is incorrect";
+          }
         } else if (error.code === "auth/invalid-email") {
           errorMessage = "Invalid email format";
+        } else {
+          errorMessage = error.message;
         }
       } else if (error instanceof Error && error.message) {
         errorMessage = error.message;
       }
-      
+
       toast({
         title: "Error",
         description: errorMessage,
         variant: "destructive",
       });
-      
+
       console.error("Login error:", error);
     }
   };
@@ -268,6 +291,17 @@ const LoginAuth = () => {
                 className="absolute right-3 top-1/2 transform -translate-y-1/2 text-gray-400 hover:text-gray-300 disabled:opacity-50"
               >
                 {showPassword ? <EyeOff size={16} /> : <Eye size={16} />}
+              </button>
+            </div>
+            {/* Forgot Password Link */}
+            <div className="text-right">
+              <button
+                type="button"
+                onClick={() => navigate("/forgot-password")}
+                className="text-xs text-primary hover:underline"
+                disabled={loading}
+              >
+                Forgot Password?
               </button>
             </div>
           </div>
